@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test
+        run: swift test
+
+      - name: Release build
+        run: swift build -c release
+
+      # The two targets that sit on a binary boundary must compile in evolution
+      # mode, or a plugin built against one SDK version cannot be loaded by a
+      # host linking another. Cheaper to catch here than in a customer's app.
+      - name: Library evolution (Core + SDK)
+        run: |
+          swift build -c release --target PluginKitCore \
+            -Xswiftc -enable-library-evolution
+          swift build -c release --target PluginKitSDK \
+            -Xswiftc -enable-library-evolution

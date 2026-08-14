@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 440" width="1200" height="440" role="img" aria-label="PluginKit — manifests are resolved without loading code; a plugin loads on first use">
+  <title>PluginKit</title>
+
+  <!-- The diagram is the actual boot path, not decoration: bundles are read as
+       manifests, validated, and recorded — all before any plugin code exists in
+       the process. Nothing crosses the dashed boundary until someone actually
+       uses a contribution. That is the whole design argument. -->
+
+  <rect width="1200" height="440" rx="14" fill="#0a0a0c"/>
+  <rect x="0.5" y="0.5" width="1199" height="439" rx="14" fill="none" stroke="#1d1d22"/>
+
+  <!-- Title -->
+  <text x="60" y="72" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="30" font-weight="600" fill="#f2f2f5">PluginKit</text>
+  <text x="60" y="102" font-family="ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif" font-size="15" fill="#7c7c88">A manifest-first plugin foundation for macOS apps</text>
+
+  <!-- Activation boundary -->
+  <line x1="686" y1="140" x2="686" y2="392" stroke="#3a3a44" stroke-width="1" stroke-dasharray="5 6"/>
+  <text x="676" y="384" text-anchor="end" font-family="ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif" font-size="12" fill="#5c5c68">declarative · no plugin code</text>
+  <text x="696" y="384" font-family="ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif" font-size="12" fill="#5c5c68">loaded on first use</text>
+
+  <!-- ── Manifest side ───────────────────────────────────────────── -->
+
+  <!-- Bundles on disk -->
+  <rect x="60" y="168" width="150" height="96" rx="10" fill="none" stroke="#2f2f38"/>
+  <text x="135" y="200" text-anchor="middle" font-family="ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#e8e8ee">Bundles</text>
+  <text x="135" y="222" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="10.5" fill="#7c7c88">plugin.json</text>
+  <text x="135" y="240" text-anchor="middle" font-family="ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif" font-size="11.5" fill="#7c7c88">read, never run</text>
+
+  <path d="M218 216 L262 216" stroke="#3a3a44" stroke-width="1.5"/>
+  <path d="M256 211 L264 216 L256 221 Z" fill="#3a3a44"/>
+
+  <!-- Resolve -->
+  <rect x="270" y="168" width="150" height="96" rx="10" fill="none" stroke="#2f2f38"/>
+  <text x="345" y="200" text-anchor="middle" font-family="ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#e8e8ee">Resolve</text>
+  <text x="345" y="222" text-anchor="middle" font-family="ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif" font-size="11.5" fill="#7c7c88">identity · dependencies</text>
+  <text x="345" y="240" text-anchor="middle" font-family="ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif" font-size="11.5" fill="#7c7c88">contract versions</text>
+
+  <path d="M428 216 L472 216" stroke="#3a3a44" stroke-width="1.5"/>
+  <path d="M466 211 L474 216 L466 221 Z" fill="#3a3a44"/>
+
+  <!-- Registry — the punchline -->
+  <rect x="480" y="168" width="170" height="96" rx="10" fill="none" stroke="#2f2f38"/>
+  <text x="565" y="200" text-anchor="middle" font-family="ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#e8e8ee">Registry</text>
+  <text x="565" y="222" text-anchor="middle" font-family="ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif" font-size="11.5" fill="#e0916f">60 resolved · 0 loaded</text>
+  <text x="565" y="240" text-anchor="middle" font-family="ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif" font-size="11.5" fill="#7c7c88">palettes · panes · lists</text>
+
+  <!-- What a host can draw from a record alone -->
+  <text x="565" y="300" text-anchor="middle" font-family="ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif" font-size="11.5" fill="#5c5c68">PluginRecord: phase, trust,</text>
+  <text x="565" y="318" text-anchor="middle" font-family="ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif" font-size="11.5" fill="#5c5c68">warnings, activation cost</text>
+  <path d="M565 268 L565 286" stroke="#3a3a44" stroke-width="1.5" stroke-dasharray="3 3"/>
+
+  <!-- Crossing the boundary -->
+  <path d="M658 216 L714 216" stroke="#3a3a44" stroke-width="1.5"/>
+  <path d="M708 211 L716 216 L708 221 Z" fill="#3a3a44"/>
+  <text x="686" y="204" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="10.5" fill="#5c5c68">first use</text>
+
+  <!-- ── Activation side ─────────────────────────────────────────── -->
+
+  <rect x="722" y="168" width="150" height="96" rx="10" fill="none" stroke="#c2582f"/>
+  <text x="797" y="200" text-anchor="middle" font-family="ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#f0a488">Activate</text>
+  <text x="797" y="222" text-anchor="middle" font-family="ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif" font-size="11.5" fill="#a4735e">runtime loads</text>
+  <text x="797" y="240" text-anchor="middle" font-family="ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif" font-size="11.5" fill="#a4735e">memoised, deduplicated</text>
+
+  <!-- What the broker enforces, arriving from policy -->
+  <text x="797" y="300" text-anchor="middle" font-family="ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif" font-size="11.5" fill="#5c5c68">capabilities brokered</text>
+  <text x="797" y="318" text-anchor="middle" font-family="ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif" font-size="11.5" fill="#5c5c68">trust · policy · consent</text>
+  <path d="M797 268 L797 286" stroke="#3a3a44" stroke-width="1.5" stroke-dasharray="3 3"/>
+
+  <path d="M880 216 L924 216" stroke="#3a3a44" stroke-width="1.5"/>
+  <path d="M918 211 L926 216 L918 221 Z" fill="#3a3a44"/>
+
+  <rect x="932" y="168" width="208" height="96" rx="10" fill="none" stroke="#2f2f38"/>
+  <text x="1036" y="200" text-anchor="middle" font-family="ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#e8e8ee">Contribution</text>
+  <text x="1036" y="222" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="10.5" fill="#7c7c88">try await handle.resolve()</text>
+  <text x="1036" y="240" text-anchor="middle" font-family="ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif" font-size="11.5" fill="#7c7c88">→ your own extension point</text>
+
+  <!-- Footer -->
+  <text x="60" y="404" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5" fill="#4e4e58">macOS 13+   —   Swift 6, strict concurrency, no dependencies   —   the host owns the vocabulary</text>
+</svg>
