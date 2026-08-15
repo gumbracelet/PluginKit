@@ -16,6 +16,17 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Tags, so the version check below has something to compare against.
+          fetch-depth: 0
+
+      # `PluginKitVersion.current` is compiled in and checked against every
+      # plugin's `sdkVersion` at discovery, while the git tag is what SwiftPM
+      # resolves. Two spellings of one fact drift silently — this repository
+      # shipped tag v1.0.0 against a constant reading 0.1.0 — and the symptom
+      # only ever appears in the field, as a plugin that will not load.
+      - name: Package version matches the newest tag
+        run: Scripts/pluginkit-version check
 
       - name: Test
         run: swift test

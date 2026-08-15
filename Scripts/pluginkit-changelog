@@ -34,8 +34,9 @@ All notable changes to PluginKit are documented in this file.
 The format follows [Conventional Commits](https://www.conventionalcommits.org),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-While PluginKit is pre-1.0, a **minor** bump may change public API — see
-[docs/distribution.md](docs/distribution.md) for what each bump promises.
+Releases are tagged \`vMAJOR.MINOR.PATCH\`; the heading below carries the bare
+version. See [docs/distribution.md](docs/distribution.md) for what each bump
+promises.
 "
 
 # Section order and headings. Types absent from this list — `chore` above all —
@@ -81,11 +82,19 @@ repository_url() {
 # Newest release tag, ignoring prereleases so a beta never becomes the base for a
 # stable bump. Empty before the first release.
 #
+# `exclude` drops one tag from consideration. That matters on the tag-push
+# release path, where the tag being released already points at HEAD: without it
+# the newest tag *is* the one under release, the changelog range collapses to
+# `v1.0.0..v1.0.0`, and the release ships with empty notes. Which is what
+# happened to v1.0.0.
+#
 # Filtered with awk rather than `grep -v`: grep exits non-zero when it matches
 # nothing, which under `set -e` would kill the script on a repository that has no
 # tags yet — exactly the first-release case.
 latest_tag() {
-    git -C "$REPO_ROOT" tag -l 'v*' --sort=-v:refname | awk '!/-/ { print; exit }'
+    local exclude="${1:-}"
+    git -C "$REPO_ROOT" tag -l 'v*' --sort=-v:refname \
+        | awk -v skip="$exclude" '!/-/ && $0 != skip { print; exit }'
 }
 
 # ---------------------------------------------------------------------------
@@ -229,7 +238,9 @@ cmd_notes() {
 
     local url previous range heading
     url="$(repository_url)"
-    previous="${since:-$(latest_tag)}"
+    # Excluding v$version matters when the tag under release already exists —
+    # otherwise the range is the tag against itself and the notes come out empty.
+    previous="${since:-$(latest_tag "v$version")}"
 
     if [ -n "$previous" ] && git -C "$REPO_ROOT" rev-parse "$previous" >/dev/null 2>&1; then
         range="$previous..HEAD"

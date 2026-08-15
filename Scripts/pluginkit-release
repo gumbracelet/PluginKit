@@ -40,12 +40,13 @@ WHAT IT DOES
     2. Resolves the next version from the newest tag. `auto` infers the bump
        from the conventional-commit prefixes since the last tag (breaking ->
        major, feat -> minor, otherwise patch).
-    3. swift build && swift test && the library-evolution check.
-    4. Writes CHANGELOG.md, commits, and tags.
-    5. Optionally pushes and publishes.
+    3. Stamps PluginKitVersion.current so the tested tree is the shipped tree.
+    4. swift build && swift test && the library-evolution check.
+    5. Writes CHANGELOG.md, commits, and tags `vX.Y.Z`.
+    6. Optionally pushes and publishes a release titled `vX.Y.Z`.
 
-    Steps 1–3 happen before anything is written, so a failure leaves the
-    repository exactly as it was.
+    Nothing is committed until step 5, and the step-3 stamp is reverted on any
+    failure, so a broken build leaves the repository exactly as it was.
 
 EXAMPLES
     Scripts/pluginkit-release minor --dry-run     # rehearse
@@ -101,6 +102,32 @@ git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null \
 echo "  ${PREVIOUS:-none} -> v$VERSION"
 
 # ---------------------------------------------------------------------------
+# Stamp
+# ---------------------------------------------------------------------------
+
+# Before building, not after: `PluginKitVersion.current` is compiled in, so
+# stamping it first means the tree that gets tested is the tree that ships. The
+# reverse order would tag a commit whose version constant was never compiled.
+#
+# This is the one write that happens ahead of verification. It is reverted below
+# if anything fails, so a broken build still leaves the tree as it was.
+VERSION_FILE="Sources/PluginKitCore/Contracts/Plugin.swift"
+
+# Reverts the stamp on any exit where it has not been committed — a failed
+# build, a dry run, an interrupt. Once the release commit exists the path is
+# clean, so this becomes a no-op and the stamp survives.
+restore_version() {
+    if [ -n "$(git status --porcelain -- "$VERSION_FILE")" ]; then
+        git checkout -- "$VERSION_FILE"
+        printf "  reverted %s\n" "$VERSION_FILE" >&2
+    fi
+}
+trap restore_version EXIT
+
+step "Stamping the package version"
+Scripts/pluginkit-version set "$VERSION"
+
+# ---------------------------------------------------------------------------
 # Verify
 # ---------------------------------------------------------------------------
 
@@ -148,8 +175,12 @@ else
     Scripts/pluginkit-changelog update "$VERSION"
 fi
 
-git add CHANGELOG.md
+git add CHANGELOG.md "$VERSION_FILE"
 git commit -m "chore(release): $VERSION [skip ci]"
+
+# Annotated, never lightweight: the tag carries the package name and version as
+# its message, which is the one place `PluginKit $VERSION` is spelled out. The
+# tag *ref* is `v$VERSION` and the GitHub release is titled the same.
 git tag -a "v$VERSION" -m "PluginKit $VERSION"
 
 echo "  Tagged v$VERSION"
@@ -160,7 +191,7 @@ if [ "$PUBLISH" = "true" ]; then
     git push origin HEAD
     git push origin "v$VERSION"
     gh release create "v$VERSION" \
-        --title "PluginKit $VERSION" \
+        --title "v$VERSION" \
         --notes-file "$NOTES_FILE"
     echo "  Published v$VERSION"
 else

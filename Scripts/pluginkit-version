@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+#
+# pluginkit-version — keep the compiled version in step with the git tag.
+#
+# The git tag is the version of record: it is what SwiftPM resolves, and it is
+# the only version a consumer can actually pin. But the framework also has to
+# know its own version at runtime — `PluginKitVersion.current` is checked against
+# every plugin's `sdkVersion` at discovery, and `PluginManifestBuilder` stamps it
+# into the manifests it writes. That constant is compiled in, so it cannot be
+# read from a tag at build time.
+#
+# Two sources for one fact is exactly how they drift, and this pair already did:
+# the repository shipped tag v1.0.0 while the constant still read 0.1.0. So the
+# tag stays authoritative and this script makes the constant follow it — written
+# by the release path, verified everywhere else.
+#
+# No dependencies, and written for the bash 3.2 that ships with macOS.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VERSION_FILE="$REPO_ROOT/Sources/PluginKitCore/Contracts/Plugin.swift"
+
+# The one line that holds the constant. Anchored on the declaration rather than
+# on the literal so a stale value cannot make the match silently miss.
+VERSION_PATTERN='^(    public static let current: SemanticVersion = ")[^"]*(")$'
+
+die() { printf "error: %s\n" "$*" >&2; exit 1; }
+
+# Reject anything that is not MAJOR.MINOR.PATCH with an optional prerelease or
+# build suffix. A malformed value written into a Swift string literal would fail
+# at compile time at best, and at worst compile into a version nobody meant.
+require_semver() {
+    case "$1" in
+        "") die "no version given" ;;
+        *[!0-9A-Za-z.+-]*) die "'$1' is not a plausible version" ;;
+    esac
+    printf '%s' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$' \
+        || die "'$1' is not semver (expected MAJOR.MINOR.PATCH)"
+}
+
+# The newest release tag, prereleases excluded. Filtered with awk rather than
+# `grep -v`, which exits non-zero on no match and would kill the script under
+# `set -e` on a repository with no tags yet.
+latest_tag() {
+    git -C "$REPO_ROOT" tag -l 'v*' --sort=-v:refname | awk '!/-/ { print; exit }'
+}
+
+cmd_read() {
+    [ -f "$VERSION_FILE" ] || die "$VERSION_FILE not found"
+    local value
+    value="$(sed -nE 's/^    public static let current: SemanticVersion = "([^"]*)"$/\1/p' \
+        "$VERSION_FILE" | head -1)"
+    [ -n "$value" ] \
+        || die "could not find PluginKitVersion.current in $VERSION_FILE"
+    echo "$value"
+}
+
+cmd_set() {
+    local version="${1:-}"
+    require_semver "$version"
+    [ -f "$VERSION_FILE" ] || die "$VERSION_FILE not found"
+
+    local current
+    current="$(cmd_read)"
+    if [ "$current" = "$version" ]; then
+        echo "PluginKitVersion.current is already $version"
+        return
+    fi
+
+    # Written through a temp file rather than `sed -i`, whose in-place spelling
+    # differs between BSD and GNU sed and would break on one of the two.
+    local tmp
+    tmp="$(mktemp)"
+    sed -E "s/$VERSION_PATTERN/\1$version\2/" "$VERSION_FILE" >"$tmp"
+    mv "$tmp" "$VERSION_FILE"
+
+    # Confirm the write landed. A pattern that stopped matching would otherwise
+    # leave the old version in place and report success.
+    local written
+    written="$(cmd_read)"
+    [ "$written" = "$version" ] \
+        || die "failed to write $version (file still reads $written)"
+
+    echo "PluginKitVersion.current: $current -> $version"
+}
+
+# With an argument, check against it. Without, check against the newest tag.
+cmd_check() {
+    local expected="${1:-}"
+    if [ -z "$expected" ]; then
+        local tag
+        tag="$(latest_tag)"
+        if [ -z "$tag" ]; then
+            echo "no release tag yet — nothing to check against"
+            return
+        fi
+        expected="${tag#v}"
+    fi
+    expected="${expected#v}"
+    require_semver "$expected"
+
+    local actual
+    actual="$(cmd_read)"
+    if [ "$actual" != "$expected" ]; then
+        printf "error: version drift\n" >&2
+        printf "  git tag says:              %s\n" "$expected" >&2
+        printf "  PluginKitVersion.current:  %s\n" "$actual" >&2
+        printf "\n" >&2
+        printf "  A plugin's sdkVersion is checked against the constant, not the tag,\n" >&2
+        printf "  so a release that ships them apart resolves as one version and\n" >&2
+        printf "  admits plugins built for another.\n" >&2
+        printf "\n" >&2
+        printf "  Fix with: Scripts/pluginkit-version set %s\n" "$expected" >&2
+        exit 1
+    fi
+    echo "PluginKitVersion.current matches $expected"
+}
+
+usage() {
+    cat <<'EOF'
+pluginkit-version — keep the compiled version in step with the git tag.
+
+USAGE
+    Scripts/pluginkit-version <command> [arguments]
+
+COMMANDS
+    read
+        Print PluginKitVersion.current.
+
+    set <x.y.z>
+        Rewrite PluginKitVersion.current to that version. The release path calls
+        this before building, so the tree that is tested is the tree that ships.
+
+    check [x.y.z]
+        Fail if PluginKitVersion.current disagrees. With no argument, checks
+        against the newest v* tag. CI runs this, and so does the tag-push release
+        path — a hand-pushed tag writes no commit, so the constant has to have
+        been set already.
+
+WHY
+    The git tag is the version of record: it is what SwiftPM resolves and the
+    only thing a consumer can pin. But `PluginKitVersion.current` is compiled in,
+    because a plugin's `sdkVersion` is checked against it at discovery, before
+    anything loads. The tag stays authoritative; this makes the constant follow.
+
+EXAMPLES
+    Scripts/pluginkit-version read           # 1.0.0
+    Scripts/pluginkit-version set 1.1.0      # rewrite the constant
+    Scripts/pluginkit-version check          # compare against the newest tag
+
+SEE ALSO
+    Scripts/pluginkit-release      Run a full release locally
+    Scripts/pluginkit-changelog    Version arithmetic and release notes
+    docs/distribution.md           Versioning policy and the release flow
+EOF
+}
+
+case "${1:-}" in
+    read) shift; cmd_read "$@" ;;
+    set) shift; cmd_set "$@" ;;
+    check) shift; cmd_check "$@" ;;
+    -h|--help|help|"") usage ;;
+    *) die "unknown command '$1' (try --help)" ;;
+esac

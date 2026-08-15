@@ -79,11 +79,41 @@ jobs:
             sources:
               - 'Sources/**'
 
-      # The auto path only proceeds when Sources/ actually changed. This same
-      # guard gates every step below, so a Sources-less push (e.g. the release's
-      # own CHANGELOG.md commit) short-circuits cleanly without failing.
+      # One decision, computed once, gating every step below — rather than the
+      # same compound condition repeated on each, where a step that forgot a
+      # clause would run when it should not.
+      #
+      # The release commit now touches Sources/ (it stamps the version
+      # constant), so the paths-filter alone no longer distinguishes real work
+      # from the release's own commit. The subject check is what does. Pushing
+      # with the default GITHUB_TOKEN already does not retrigger workflows; this
+      # is the second line of defence, and the one that survives someone
+      # swapping in a PAT.
+      - name: Decide whether to release
+        id: gate
+        env:
+          SOURCES_CHANGED: ${{ steps.changes.outputs.sources }}
+        run: |
+          if [ "$AUTO" != "true" ]; then
+            echo "proceed=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$SOURCES_CHANGED" != "true" ]; then
+            echo "Sources/ unchanged — nothing to release"
+            echo "proceed=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          subject="$(git log -1 --format='%s')"
+          case "$subject" in
+            "chore(release): "*)
+              echo "HEAD is the release commit itself — not releasing it again"
+              echo "proceed=false" >>"$GITHUB_OUTPUT"
+              exit 0 ;;
+          esac
+          echo "proceed=true" >>"$GITHUB_OUTPUT"
+
       - name: Show toolchain
-        if: env.AUTO != 'true' || steps.changes.outputs.sources == 'true'
+        if: steps.gate.outputs.proceed == 'true'
         run: swift --version
 
       # Dispatched: derive the next version from the newest tag and the chosen
@@ -94,7 +124,7 @@ jobs:
       # so a crafted branch or tag name cannot inject commands here.
       - name: Resolve version
         id: version
-        if: env.AUTO != 'true' || steps.changes.outputs.sources == 'true'
+        if: steps.gate.outputs.proceed == 'true'
         env:
           VERSION_TYPE: ${{ inputs.version_type }}
         run: |
@@ -127,14 +157,37 @@ jobs:
           echo "version=$version" >>"$GITHUB_OUTPUT"
           echo "previous=$previous" >>"$GITHUB_OUTPUT"
 
+      # `PluginKitVersion.current` is compiled in — a plugin's `sdkVersion` is
+      # checked against the constant, not the tag — so the two have to ship as
+      # one number. This is what keeps them together.
+      #
+      # It runs before the build, so the tree that gets tested is the tree that
+      # gets tagged. Stamping afterwards would tag a commit whose version
+      # constant was never compiled.
+      - name: Stamp the package version
+        if: steps.gate.outputs.proceed == 'true' && (env.DISPATCHED == 'true' || env.AUTO == 'true')
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: Scripts/pluginkit-version set "$VERSION"
+
+      # The tag-push path writes no commit, so there is nothing to stamp into —
+      # the constant must already agree with the tag. Failing here is the whole
+      # point: it is the check that would have caught v1.0.0 shipping with the
+      # constant still reading 0.1.0.
+      - name: Check the package version matches the tag
+        if: steps.gate.outputs.proceed == 'true' && env.DISPATCHED != 'true' && env.AUTO != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: Scripts/pluginkit-version check "$VERSION"
+
       # Everything that can fail runs before the repository is touched, so a
       # broken build never leaves a stray tag or changelog commit behind.
       - name: Test
-        if: env.AUTO != 'true' || steps.changes.outputs.sources == 'true'
+        if: steps.gate.outputs.proceed == 'true'
         run: swift test
 
       - name: Release build
-        if: env.AUTO != 'true' || steps.changes.outputs.sources == 'true'
+        if: steps.gate.outputs.proceed == 'true'
         run: swift build -c release
 
       # PluginKitCore and PluginKitSDK are the only targets on a binary boundary
@@ -143,7 +196,7 @@ jobs:
       # cannot be loaded by a host linking another, and nothing else in the build
       # would say so. See docs/distribution.md.
       - name: Library evolution (Core + SDK)
-        if: env.AUTO != 'true' || steps.changes.outputs.sources == 'true'
+        if: steps.gate.outputs.proceed == 'true'
         run: |
           swift build -c release --target PluginKitCore \
             -Xswiftc -enable-library-evolution
@@ -152,7 +205,7 @@ jobs:
 
       - name: Generate release notes
         id: notes
-        if: env.AUTO != 'true' || steps.changes.outputs.sources == 'true'
+        if: steps.gate.outputs.proceed == 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
           PREVIOUS: ${{ steps.version.outputs.previous }}
@@ -176,7 +229,7 @@ jobs:
       # workflows, which is what stops the new tag from starting a second
       # release. Swapping in a PAT here would reintroduce that loop.
       - name: Commit changelog and tag
-        if: (env.DISPATCHED == 'true' || env.AUTO == 'true') && env.DRY_RUN != 'true' && (env.AUTO != 'true' || steps.changes.outputs.sources == 'true')
+        if: steps.gate.outputs.proceed == 'true' && (env.DISPATCHED == 'true' || env.AUTO == 'true') && env.DRY_RUN != 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
           PREVIOUS: ${{ steps.version.outputs.previous }}
@@ -189,14 +242,18 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add CHANGELOG.md
+          # The stamped version constant ships in the same commit as its
+          # changelog entry, so the two can never be pushed apart.
+          git add CHANGELOG.md Sources/PluginKitCore/Contracts/Plugin.swift
           git commit -m "chore(release): $VERSION [skip ci]"
+          # Annotated, never lightweight. The tag ref is `vX.Y.Z`; its message is
+          # the one place the package name is spelled out.
           git tag -a "v$VERSION" -m "PluginKit $VERSION"
           git push origin HEAD:"${GITHUB_REF_NAME}"
           git push origin "v$VERSION"
 
       - name: Publish a GitHub release
-        if: env.DRY_RUN != 'true' && (env.AUTO != 'true' || steps.changes.outputs.sources == 'true')
+        if: steps.gate.outputs.proceed == 'true' && env.DRY_RUN != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
@@ -219,12 +276,15 @@ jobs:
             echo "See [docs/getting-started.md]($REPO_URL/blob/v$VERSION/docs/getting-started.md)."
           } >"$body"
 
+          # Titled with the bare tag, matching the ref. The package name is
+          # already on the page, so repeating it here only makes the release
+          # list harder to scan.
           gh release create "v$VERSION" \
-            --title "PluginKit $VERSION" \
+            --title "v$VERSION" \
             --notes-file "$body"
 
       - name: Summary
-        if: env.AUTO != 'true' || steps.changes.outputs.sources == 'true'
+        if: steps.gate.outputs.proceed == 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
           PREVIOUS: ${{ steps.version.outputs.previous }}
