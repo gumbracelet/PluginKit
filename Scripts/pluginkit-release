@@ -27,7 +27,7 @@ usage() {
 pluginkit-release — cut a release.
 
 USAGE
-    Scripts/pluginkit-release <patch|minor|major> [options]
+    Scripts/pluginkit-release <patch|minor|major|auto> [options]
     Scripts/pluginkit-release --version <x.y.z> [options]
 
 OPTIONS
@@ -37,7 +37,9 @@ OPTIONS
 
 WHAT IT DOES
     1. Refuses to run on a dirty tree or a shallow clone.
-    2. Resolves the next version from the newest tag.
+    2. Resolves the next version from the newest tag. `auto` infers the bump
+       from the conventional-commit prefixes since the last tag (breaking ->
+       major, feat -> minor, otherwise patch).
     3. swift build && swift test && the library-evolution check.
     4. Writes CHANGELOG.md, commits, and tags.
     5. Optionally pushes and publishes.
@@ -47,13 +49,13 @@ WHAT IT DOES
 
 EXAMPLES
     Scripts/pluginkit-release minor --dry-run     # rehearse
-    Scripts/pluginkit-release patch --publish     # cut and publish
+    Scripts/pluginkit-release auto --publish      # infer bump and publish
 EOF
 }
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        patch|minor|major) BUMP="$1"; shift ;;
+        patch|minor|major|auto) BUMP="$1"; shift ;;
         --version) VERSION="${2:-}"; shift 2 ;;
         --dry-run) DRY_RUN=true; shift ;;
         --publish) PUBLISH=true; shift ;;

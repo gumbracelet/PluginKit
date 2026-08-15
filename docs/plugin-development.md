@@ -75,7 +75,7 @@ let package = Package(
         .library(name: "WordCountPlugin", type: .dynamic, targets: ["WordCountPlugin"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/duongductrong/PluginKit.git", from: "0.1.0"),
+        .package(url: "https://github.com/gumbracelet/PluginKit.git", from: "0.1.0"),
         .package(url: "https://github.com/acme/AcmeEditorPluginAPI.git", from: "1.0.0"),
     ],
     targets: [

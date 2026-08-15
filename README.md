@@ -77,7 +77,7 @@ lowest-common-denominator API.
 **File → Add Package Dependencies…**, then paste:
 
 ```
-https://github.com/duongductrong/PluginKit.git
+https://github.com/gumbracelet/PluginKit.git
 ```
 
 ### Package.swift
@@ -86,7 +86,7 @@ https://github.com/duongductrong/PluginKit.git
 dependencies: [
     // Pre-1.0: pin the minor. Semver lets a 0.x minor bump break, and PluginKit
     // follows that rule in code as well as in policy.
-    .package(url: "https://github.com/duongductrong/PluginKit.git",
+    .package(url: "https://github.com/gumbracelet/PluginKit.git",
              .upToNextMinor(from: "0.1.0"))
 ],
 ```

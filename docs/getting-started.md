@@ -15,13 +15,13 @@ first-party plugin.
 ## Install
 
 **Xcode:** File → Add Package Dependencies…, then paste
-`https://github.com/duongductrong/PluginKit.git`.
+`https://github.com/gumbracelet/PluginKit.git`.
 
 **Package.swift:**
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/duongductrong/PluginKit.git", from: "0.1.0")
+    .package(url: "https://github.com/gumbracelet/PluginKit.git", from: "0.1.0")
 ],
 ```
 

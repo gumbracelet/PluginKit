@@ -51,20 +51,41 @@ compatibility is computed against. See
 
 ## Cutting a release
 
-Two paths, both landing in the same place.
+Three paths, all landing in the same place.
 
-### Manual dispatch — the normal path
+### Automatic — a push to `Sources/`
+
+Any change under `Sources/` merged to `main`/`master` ships a release with no human input.
+The workflow infers the bump from the **conventional-commit prefixes** of the commits since
+the last tag:
+
+| Prefix | Bump |
+|---|---|
+| `feat!:` / `BREAKING CHANGE:` | major |
+| `feat:` | minor |
+| anything else (`fix`, `refactor`, …) | patch |
+
+A `paths`-filter guard confirms `Sources/` actually changed, so the release's own
+`CHANGELOG.md` commit (which never touches `Sources/`) does not re-trigger a loop. This is
+the intended path for routine work — push to a branch, merge to `main`, a tag lands
+automatically.
+
+### Manual dispatch — for the unusual cases
 
 GitHub → Actions → **Release** → Run workflow:
 
 | Input | |
 |---|---|
-| `version_type` | `patch` / `minor` / `major` |
+| `version_type` | `auto` / `patch` / `minor` / `major` |
 | `dry_run` | verify and generate notes, but do not commit, tag, or publish |
+
+`auto` behaves exactly like the push path: infer the bump from commit prefixes. Pick
+`patch` / `minor` / `major` when you want to override the inference — most often a
+deliberate major when public API changed shape but the commit did not say so.
 
 The workflow then:
 
-1. Reads the newest `v*` tag and computes the next version from your chosen bump.
+1. Reads the newest `v*` tag and computes the next version.
 2. Fails if that tag already exists.
 3. Runs `swift test`, a release build, **and the library-evolution check** (below).
 4. Generates release notes from conventional commits since the last tag.
@@ -87,7 +108,8 @@ $ git tag -a v0.2.0 -m "PluginKit 0.2.0" && git push origin v0.2.0
 
 The same workflow runs on `v*` tags. It verifies, generates notes, and publishes the GitHub
 release — but does **not** write `CHANGELOG.md` or move the tag, because the tag already
-exists and its changelog entry is yours to add. Only the dispatched path owns the version.
+exists and its changelog entry is yours to add. Only the dispatched and auto paths own the
+version.
 
 ### Locally
 
@@ -95,8 +117,8 @@ Rehearse the identical sequence before trusting CI with it:
 
 ```console
 $ Scripts/pluginkit-release minor --dry-run    # verify, print notes, write nothing
-$ Scripts/pluginkit-release patch              # verify, changelog, commit, tag
-$ Scripts/pluginkit-release patch --publish    # …and push + `gh release create`
+$ Scripts/pluginkit-release auto --publish     # infer the bump, then push + `gh release create`
+$ Scripts/pluginkit-release patch --publish    # force a patch, then push + release
 ```
 
 It refuses to run on a dirty tree or a shallow clone. A shallow clone has no tag history, so
@@ -111,6 +133,7 @@ commit per entry. No Node, no dependencies, bash 3.2.
 
 ```console
 $ Scripts/pluginkit-changelog next-version minor   # 0.2.0
+$ Scripts/pluginkit-changelog next-version auto    # infer: breaking -> major, feat -> minor, else patch
 $ Scripts/pluginkit-changelog notes 0.2.0          # preview — writes nothing
 $ Scripts/pluginkit-changelog update 0.2.0         # prepend to CHANGELOG.md
 ```
@@ -138,14 +161,19 @@ fix(core): reject 0.x minors as compatible
 feat(sdk)!: rename PluginPrincipal.makePlugin
 ```
 
-### Why the bump is chosen, not inferred
+### Why the bump is normally chosen, not inferred
 
-Tools like semantic-release derive the bump from commit types. PluginKit asks a human,
-because for a library the minor-versus-major decision depends on whether *public API changed
-shape* — which a commit prefix does not reliably capture. That distinction matters more here
-than in most packages: `PluginKitCore` sits on a binary boundary between separately-compiled
-host and plugin code, so an unnoticed breaking change does not produce a compile error for
-the person affected. It produces a plugin that will not load in the field.
+Tools like semantic-release derive the bump from commit types. PluginKit's default is to ask
+a human, because for a library the minor-versus-major decision depends on whether *public
+API changed shape* — which a commit prefix does not reliably capture. That distinction
+matters more here than in most packages: `PluginKitCore` sits on a binary boundary between
+separately-compiled host and plugin code, so an unnoticed breaking change does not produce a
+compile error for the person affected. It produces a plugin that will not load in the field.
+
+The automatic `Sources/` path and `next-version auto` therefore use conventional-commit
+prefixes as a **fallback**: a `BREAKING CHANGE` or `feat!:` forces a major, `feat:` a minor,
+everything else a patch. It is a sensible default, not a guarantee — if your commit history
+did not capture an API-shape change, dispatch manually and pick the bump yourself.
 
 ## Library evolution
 

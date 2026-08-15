@@ -10,11 +10,15 @@
 # SwiftPM package, so the tag *is* the version — there is nothing else to keep in
 # sync, and no `version` field that can drift from what a consumer resolves.
 #
-# The bump is chosen by a human rather than inferred from commit types. That is
-# deliberate: for a library, the minor-versus-major decision depends on whether
-# public API changed shape, which a commit prefix does not reliably capture. The
-# distinction matters more here than in most packages, because PluginKitCore sits
-# on a binary boundary between separately-compiled host and plugin code.
+# The bump is normally chosen by a human (see docs/distribution.md), because for
+# a library the minor-versus-major decision depends on whether public API changed
+# shape, which a commit prefix does not reliably capture. That distinction matters
+# more here than in most packages: PluginKitCore sits on a binary boundary between
+# separately-compiled host and plugin code.
+#
+# `next-version auto` offers the conventional-commit fallback for CI: a BREAKING
+# change -> major, feat -> minor, anything else -> patch. It exists for automated
+# releases and can be overridden by a manual dispatch.
 #
 # No dependencies, and written for the bash 3.2 that ships with macOS.
 
@@ -88,11 +92,37 @@ latest_tag() {
 # next-version
 # ---------------------------------------------------------------------------
 
+# Does any commit in `range` carry a breaking marker? Either the `!` before the
+# colon (`feat!:`, `fix(scope)!:`) or a `BREAKING CHANGE:` footer.
+range_has_breaking() {
+    local range="$1"
+    [ -n "$(git -C "$REPO_ROOT" log "$range" --no-merges --format='%s' \
+        | grep -E '^[A-Za-z]+(\([^)]*\))?!:')" ] && return 0
+    [ -n "$(git -C "$REPO_ROOT" log "$range" --no-merges --format='%B' \
+        | grep -E '^BREAKING[ -]CHANGE:')" ] && return 0
+    return 1
+}
+
+# The conventional-commit bump for the commits in `range`. A breaking change
+# forces a major; otherwise a feature forces a minor; everything else — fixes,
+# refactors, docs, chore — is a patch.
+infer_bump() {
+    local range="$1"
+    if range_has_breaking "$range"; then
+        echo major
+    elif [ -n "$(git -C "$REPO_ROOT" log "$range" --no-merges --format='%s' \
+        | grep -E '^feat(\([^)]*\))?:')" ]; then
+        echo minor
+    else
+        echo patch
+    fi
+}
+
 cmd_next_version() {
     local bump="${1:-}"
     case "$bump" in
-        major|minor|patch) ;;
-        *) die "next-version needs one of: patch, minor, major" ;;
+        major|minor|patch|auto) ;;
+        *) die "next-version needs one of: patch, minor, major, auto" ;;
     esac
 
     local current base major minor patch
@@ -103,6 +133,17 @@ cmd_next_version() {
     else
         base="${current#v}"
         base="${base%%-*}"
+    fi
+
+    if [ "$bump" = "auto" ]; then
+        # Infer the bump from the commits since the last release. On the first
+        # release that is the whole history.
+        local range="HEAD"
+        if [ -n "$current" ]; then
+            range="$current..HEAD"
+        fi
+        bump="$(infer_bump "$range")"
+        echo "auto: $bump bump since ${current:-none}" >&2
     fi
 
     IFS='.' read -r major minor patch <<EOF
@@ -350,9 +391,11 @@ USAGE
     Scripts/pluginkit-changelog <command> [arguments]
 
 COMMANDS
-    next-version <patch|minor|major>
+    next-version <patch|minor|major|auto>
         Print the next version, computed from the newest release tag.
         Prints 0.0.1 / 0.1.0 / 1.0.0 when no tag exists yet.
+        `auto` infers the bump from the conventional-commit prefixes since the
+        last tag: BREAKING change -> major, feat -> minor, otherwise patch.
 
     notes <version> [--since <tag>]
         Print release notes for the range since the last release tag.
@@ -375,6 +418,7 @@ COMMIT TYPES
 
 EXAMPLES
     Scripts/pluginkit-changelog next-version minor        # 0.2.0
+    Scripts/pluginkit-changelog next-version auto         # infer from commits
     Scripts/pluginkit-changelog notes 0.2.0               # preview, no writes
     Scripts/pluginkit-changelog update 0.2.0              # write CHANGELOG.md
 

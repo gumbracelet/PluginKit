@@ -8,8 +8,9 @@ on:
         description: "Version bump type"
         required: true
         type: choice
-        default: patch
+        default: auto
         options:
+          - auto
           - patch
           - minor
           - major
@@ -19,8 +20,18 @@ on:
         type: boolean
         default: false
 
-  # The escape hatch: tag by hand and this still works.
+  # The automatic path: a change under Sources/ ships a release. The version is
+  # inferred from the conventional-commit prefixes since the last tag (breaking
+  # -> major, feat -> minor, otherwise patch), so no human input is needed.
+  #
+  # GitHub ignores `paths` for tag pushes and treats branches+paths ambiguously,
+  # so this single block is guarded by an explicit paths-filter step below: the
+  # auto branch only proceeds when Sources/ actually changed. That also stops
+  # the release's own CHANGELOG.md commit (which never touches Sources/) from
+  # re-triggering this workflow in a loop.
   push:
+    branches: [master, main]
+    paths: ["Sources/**"]
     tags: ["v*"]
 
 permissions:
@@ -42,6 +53,8 @@ jobs:
       # Secrets and inputs are not dependably readable from a step-level `if`,
       # but job-level env is, so the conditions are hoisted here as booleans.
       DISPATCHED: ${{ github.event_name == 'workflow_dispatch' }}
+      # A branch push (not a tag push) to main/master is the auto-release path.
+      AUTO: ${{ github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/') }}
       DRY_RUN: ${{ inputs.dry_run == true }}
 
     steps:
@@ -52,16 +65,36 @@ jobs:
           # compute a wrong version silently, which is worse than failing.
           fetch-depth: 0
 
+      # GitHub ignores `paths` for tag pushes and its branches+paths evaluation
+      # is unreliable, so the trigger above is a pre-filter only. Confirm the
+      # auto path really changed Sources/ before releasing; otherwise bail out
+      # with a clean no-op. This is what stops the release's own CHANGELOG.md
+      # push to main/master from re-running the release forever.
+      - name: Confirm Sources/ changed
+        id: changes
+        if: env.AUTO == 'true'
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            sources:
+              - 'Sources/**'
+
+      # The auto path only proceeds when Sources/ actually changed. This same
+      # guard gates every step below, so a Sources-less push (e.g. the release's
+      # own CHANGELOG.md commit) short-circuits cleanly without failing.
       - name: Show toolchain
+        if: env.AUTO != 'true' || steps.changes.outputs.sources == 'true'
         run: swift --version
 
       # Dispatched: derive the next version from the newest tag and the chosen
-      # bump. Tag-pushed: the tag already says what the version is.
+      # bump. Auto-pushed: infer the bump from the conventional-commit prefixes
+      # since the last tag. Tag-pushed: the tag already says what the version is.
       #
       # Inputs reach the shell through env, never through direct interpolation,
       # so a crafted branch or tag name cannot inject commands here.
       - name: Resolve version
         id: version
+        if: env.AUTO != 'true' || steps.changes.outputs.sources == 'true'
         env:
           VERSION_TYPE: ${{ inputs.version_type }}
         run: |
@@ -69,6 +102,10 @@ jobs:
             previous="$(git tag -l 'v*' --sort=-v:refname | awk '!/-/ { print; exit }')"
             version="$(Scripts/pluginkit-changelog next-version "$VERSION_TYPE")"
             echo "Bumping $VERSION_TYPE: ${previous:-none} -> v$version"
+          elif [ "$AUTO" = "true" ]; then
+            previous="$(git tag -l 'v*' --sort=-v:refname | awk '!/-/ { print; exit }')"
+            version="$(Scripts/pluginkit-changelog next-version auto)"
+            echo "Auto-releasing from commits since ${previous:-none} -> v$version"
           else
             version="${GITHUB_REF_NAME#v}"
             # The tag under release is already at HEAD, so the changelog range
@@ -81,7 +118,8 @@ jobs:
             *[!0-9A-Za-z.+-]*|"") echo "refusing implausible version '$version'" >&2; exit 1 ;;
           esac
 
-          if [ "$DISPATCHED" = "true" ] && git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+          if { [ "$DISPATCHED" = "true" ] || [ "$AUTO" = "true" ]; } \
+            && git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
             echo "tag v$version already exists — nothing to bump into" >&2
             exit 1
           fi
@@ -92,9 +130,11 @@ jobs:
       # Everything that can fail runs before the repository is touched, so a
       # broken build never leaves a stray tag or changelog commit behind.
       - name: Test
+        if: env.AUTO != 'true' || steps.changes.outputs.sources == 'true'
         run: swift test
 
       - name: Release build
+        if: env.AUTO != 'true' || steps.changes.outputs.sources == 'true'
         run: swift build -c release
 
       # PluginKitCore and PluginKitSDK are the only targets on a binary boundary
@@ -103,6 +143,7 @@ jobs:
       # cannot be loaded by a host linking another, and nothing else in the build
       # would say so. See docs/distribution.md.
       - name: Library evolution (Core + SDK)
+        if: env.AUTO != 'true' || steps.changes.outputs.sources == 'true'
         run: |
           swift build -c release --target PluginKitCore \
             -Xswiftc -enable-library-evolution
@@ -111,6 +152,7 @@ jobs:
 
       - name: Generate release notes
         id: notes
+        if: env.AUTO != 'true' || steps.changes.outputs.sources == 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
           PREVIOUS: ${{ steps.version.outputs.previous }}
@@ -126,15 +168,15 @@ jobs:
           echo "--- generated notes ---"
           cat "$notes"
 
-      # Only the dispatched path owns the version, so only it writes CHANGELOG.md
-      # and creates the tag. A hand-pushed tag already exists, and its changelog
-      # entry is the maintainer's to add.
+      # Only the dispatched and auto paths own the version, so only they write
+      # CHANGELOG.md and create the tag. A hand-pushed tag already exists, and
+      # its changelog entry is the maintainer's to add.
       #
       # Pushing with the default GITHUB_TOKEN deliberately does not retrigger
       # workflows, which is what stops the new tag from starting a second
       # release. Swapping in a PAT here would reintroduce that loop.
       - name: Commit changelog and tag
-        if: env.DISPATCHED == 'true' && env.DRY_RUN != 'true'
+        if: (env.DISPATCHED == 'true' || env.AUTO == 'true') && env.DRY_RUN != 'true' && (env.AUTO != 'true' || steps.changes.outputs.sources == 'true')
         env:
           VERSION: ${{ steps.version.outputs.version }}
           PREVIOUS: ${{ steps.version.outputs.previous }}
@@ -154,7 +196,7 @@ jobs:
           git push origin "v$VERSION"
 
       - name: Publish a GitHub release
-        if: env.DRY_RUN != 'true'
+        if: env.DRY_RUN != 'true' && (env.AUTO != 'true' || steps.changes.outputs.sources == 'true')
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
@@ -182,6 +224,7 @@ jobs:
             --notes-file "$body"
 
       - name: Summary
+        if: env.AUTO != 'true' || steps.changes.outputs.sources == 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
           PREVIOUS: ${{ steps.version.outputs.previous }}
