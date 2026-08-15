@@ -21,7 +21,7 @@ first-party plugin.
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/gumbracelet/PluginKit.git", from: "0.1.0")
+    .package(url: "https://github.com/gumbracelet/PluginKit.git", from: "1.0.0")
 ],
 ```
 

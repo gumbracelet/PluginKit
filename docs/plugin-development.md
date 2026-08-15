@@ -15,7 +15,7 @@ Writing a plugin for a PluginKit host. You do not need the host's source.
 
 ```console
 $ pluginkit describe --host /Applications/AcmeEditor.app
-com.acme.editor 3.2.0  ·  PluginKit 0.1.0
+com.acme.editor 3.2.0  ·  PluginKit 1.0.0
 
 VOCABULARIES
   com.acme.editor.api  1.2.0   accepts >=1.0.0 <2.0.0
@@ -75,7 +75,7 @@ let package = Package(
         .library(name: "WordCountPlugin", type: .dynamic, targets: ["WordCountPlugin"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/gumbracelet/PluginKit.git", from: "0.1.0"),
+        .package(url: "https://github.com/gumbracelet/PluginKit.git", from: "1.0.0"),
         .package(url: "https://github.com/acme/AcmeEditorPluginAPI.git", from: "1.0.0"),
     ],
     targets: [
@@ -206,7 +206,7 @@ probably a capability the host should be vending.
   "summary": "Counts words in the selection or the open document.",
   "author": { "name": "Me", "url": "https://example.com" },
 
-  "sdkVersion": ">=0.1.0 <0.2.0",
+  "sdkVersion": ">=1.0.0 <2.0.0",
   "contracts": [
     { "vocabulary": "com.acme.editor.api",
       "builtAgainst": "1.2.0",

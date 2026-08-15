@@ -84,10 +84,9 @@ https://github.com/gumbracelet/PluginKit.git
 
 ```swift
 dependencies: [
-    // Pre-1.0: pin the minor. Semver lets a 0.x minor bump break, and PluginKit
-    // follows that rule in code as well as in policy.
-    .package(url: "https://github.com/gumbracelet/PluginKit.git",
-             .upToNextMinor(from: "0.1.0"))
+    // Post-1.0: the major is the breaking boundary, and PluginKit follows that
+    // rule in code as well as in policy.
+    .package(url: "https://github.com/gumbracelet/PluginKit.git", from: "1.0.0")
 ],
 ```
 
@@ -247,7 +246,7 @@ Its `plugin.json`, inside the bundle at `Contents/Resources/`:
   "id": "com.acme.editor.markdown",
   "version": "1.0.0",
   "displayName": "Markdown Tools",
-  "sdkVersion": ">=0.1.0 <0.2.0",
+  "sdkVersion": ">=1.0.0 <2.0.0",
   "contracts": [
     { "vocabulary": "com.acme.editor.api", "builtAgainst": "1.0.0" }
   ],

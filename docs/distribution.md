@@ -14,31 +14,61 @@ constraints that decide what your app can ship.
 
 ## Versioning policy
 
-PluginKit is distributed as source over SwiftPM. **The git tag is the version** — there is no
-`version` field in a file that could drift from what a consumer resolves.
+PluginKit is distributed as source over SwiftPM, so **the git tag is the version** — it is
+what a consumer resolves and the only thing they can pin.
 
-While pre-1.0, semver's 0.x rule applies and PluginKit follows it in code as well as in
-policy:
+One number, four spellings. They are kept in step mechanically, not by hand:
+
+| Surface | Form | Written by |
+|---|---|---|
+| Git tag | `v1.0.0` — annotated, message `PluginKit 1.0.0` | release path |
+| GitHub Release | title `v1.0.0`, matching the ref | release path |
+| CHANGELOG heading | `## [1.0.0](…) (YYYY-MM-DD)` — bare version | `pluginkit-changelog` |
+| `PluginKitVersion.current` | `"1.0.0"` | `pluginkit-version set` |
+
+The `v` prefix lives on the tag and the release title, and nowhere else. The package name is
+spelled out only in the tag's annotation message.
+
+### The one version that is not the tag
+
+`PluginKitVersion.current` is compiled in, because a plugin's `sdkVersion` is checked against
+it at discovery — before anything is loaded, when no tag is readable. It is therefore a
+second source for a fact the tag already owns, and the two drifted exactly as you would
+expect: v1.0.0 shipped with the constant still reading `0.1.0`.
+
+The tag stays authoritative and the constant follows it:
+
+```console
+$ Scripts/pluginkit-version read     # 1.0.0
+$ Scripts/pluginkit-version check    # fails if it disagrees with the newest tag
+$ Scripts/pluginkit-version set 1.1.0
+```
+
+The release path stamps it *before* building, so the tree that is tested is the tree that is
+tagged, and it lands in the same `chore(release):` commit as the changelog entry — the two
+cannot be pushed apart. CI runs `check` on every push and pull request, and the tag-push
+release path runs it too, since a hand-pushed tag writes no commit to stamp into. Drift now
+fails a build rather than surfacing in the field as a plugin that will not load.
+
+### What each bump promises
 
 | Bump | Promises |
 |---|---|
-| **patch** (`0.1.0 → 0.1.1`) | No API change. Bug fixes and documentation. |
-| **minor** (`0.1.0 → 0.2.0`) | **May change public API.** Pre-1.0, the minor is the breaking boundary. |
-| **major** (`0.x → 1.0.0`) | The API is stable from here; breaking changes need another major. |
+| **patch** (`1.0.0 → 1.0.1`) | No API change. Bug fixes and documentation. |
+| **minor** (`1.0.0 → 1.1.0`) | Additive only. Existing code keeps compiling and loading. |
+| **major** (`1.x → 2.0.0`) | **May change public API.** Post-1.0, the major is the breaking boundary. |
 
-That is not just a note in a file. `VersionRange.series(of:)` implements it: for `0.x` the
-next *minor* is the breaking boundary, so `series(of: "0.3.4")` is `0.3.0 ..< 0.4.0`. A
-plugin declaring `sdkVersion` from `PluginManifestBuilder` gets `>=0.1.0 <0.2.0`, not
-`>=0.0.0 <1.0.0` — which would have let a plugin built against an early prototype load into
-a host that had since changed the contract underneath it.
+That is not just a note in a file. `VersionRange.series(of:)` implements it: for `1.x` the
+next *major* is the breaking boundary, so `series(of: "1.2.3")` is `1.0.0 ..< 2.0.0`, and a
+plugin declaring `sdkVersion` from `PluginManifestBuilder` gets `>=1.0.0 <2.0.0`.
+
+The same function still implements semver's 0.x rule for anything below 1.0 — there, the
+*minor* is the breaking boundary, so `series(of: "0.3.4")` is `0.3.0 ..< 0.4.0`. That applies
+to your own vocabulary versions while they are pre-1.0, not to PluginKit itself any more.
 
 Pin accordingly:
 
 ```swift
-// Pre-1.0: pin the minor.
-.package(url: "…/PluginKit.git", .upToNextMinor(from: "0.1.0"))
-
-// Post-1.0: the usual.
 .package(url: "…/PluginKit.git", from: "1.0.0")
 ```
 
@@ -87,29 +117,39 @@ The workflow then:
 
 1. Reads the newest `v*` tag and computes the next version.
 2. Fails if that tag already exists.
-3. Runs `swift test`, a release build, **and the library-evolution check** (below).
-4. Generates release notes from conventional commits since the last tag.
-5. Writes `CHANGELOG.md`, commits `chore(release): X.Y.Z [skip ci]`, tags `vX.Y.Z`, pushes.
-6. Publishes a GitHub release with install instructions.
+3. Stamps `PluginKitVersion.current` to that version.
+4. Runs `swift test`, a release build, **and the library-evolution check** (below).
+5. Generates release notes from conventional commits since the last tag.
+6. Writes `CHANGELOG.md`, commits `chore(release): X.Y.Z [skip ci]` with the stamped
+   constant, tags `vX.Y.Z` (annotated, `PluginKit X.Y.Z`), pushes.
+7. Publishes a GitHub release titled `vX.Y.Z` with install instructions.
 
-Everything that can fail happens in steps 1–4, **before** the repository is touched. A
-broken build never leaves a stray tag or changelog commit behind — both are far more
-annoying to undo than to prevent.
+Everything that can fail happens in steps 1–5, **before** anything is committed. A broken
+build never leaves a stray tag or changelog commit behind — both are far more annoying to
+undo than to prevent.
 
-Pushing with the default `GITHUB_TOKEN` deliberately does not retrigger workflows, which is
-what stops the new tag from starting a second release. Swapping in a PAT would reintroduce
-that loop.
+Because step 3 writes into `Sources/`, the release's own commit matches the workflow's
+`paths` filter. Two things stop it re-triggering: pushing with the default `GITHUB_TOKEN`
+does not retrigger workflows at all, and the gate step additionally refuses to release a
+`HEAD` whose subject starts with `chore(release):`. Swapping in a PAT would defeat the first
+but not the second.
 
 ### Tag by hand — the escape hatch
 
 ```console
-$ git tag -a v0.2.0 -m "PluginKit 0.2.0" && git push origin v0.2.0
+$ Scripts/pluginkit-version set 1.1.0
+$ git commit -am "chore(release): 1.1.0"
+$ git tag -a v1.1.0 -m "PluginKit 1.1.0" && git push origin v1.1.0
 ```
 
-The same workflow runs on `v*` tags. It verifies, generates notes, and publishes the GitHub
-release — but does **not** write `CHANGELOG.md` or move the tag, because the tag already
-exists and its changelog entry is yours to add. Only the dispatched and auto paths own the
-version.
+Stamp first. The same workflow runs on `v*` tags, but this path writes no commit, so it
+**checks** `PluginKitVersion.current` against the tag rather than setting it — and fails if
+you skipped that step. Tag annotated (`-a`) rather than lightweight, so the tag carries a
+message and an author.
+
+It then verifies, generates notes, and publishes the GitHub release — but does **not** write
+`CHANGELOG.md` or move the tag, because the tag already exists and its changelog entry is
+yours to add. Only the dispatched and auto paths own the version.
 
 ### Locally
 
