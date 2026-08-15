@@ -11,7 +11,11 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# `pwd -P` so this is the physical path, matching what `git rev-parse
+# --show-toplevel` reports. Without it the two disagree wherever the checkout
+# sits under a symlink — /tmp on macOS is /private/tmp, and the toplevel check
+# below would reject a perfectly good repository.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$REPO_ROOT"
 
 BUMP=""
@@ -79,6 +83,9 @@ step "Checking preconditions"
 TOPLEVEL="$(git rev-parse --show-toplevel 2>/dev/null || echo "")"
 [ -n "$TOPLEVEL" ] \
     || die "not a git repository; the version comes from tags, so there is nothing to release"
+# Resolved the same way as REPO_ROOT, so the comparison is between two physical
+# paths and a symlink anywhere above the checkout cannot fail it spuriously.
+TOPLEVEL="$(cd "$TOPLEVEL" && pwd -P)"
 [ "$TOPLEVEL" = "$REPO_ROOT" ] \
     || die "$REPO_ROOT is not a git repository of its own (its parent $TOPLEVEL is); run 'git init' here first"
 
