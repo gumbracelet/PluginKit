@@ -55,6 +55,18 @@ build|📦 Build System
 ci|👷 CI/CD
 style|💄 Styles'
 
+# The commit types that justify cutting a release on their own, plus any commit
+# marked breaking. Deliberately narrower than SECTIONS: a `docs` or `test`
+# commit earns a changelog line when a release happens, but is not itself a
+# reason to make one.
+#
+# This is what separates a semantic release from a path-triggered one. Releasing
+# because a file under Sources/ moved ships versions whose entire changelog entry
+# reads "_No user-facing changes recorded._" — a version number consumers must
+# evaluate, for nothing. `refactor` is excluded for the same reason: if a
+# refactor changed behaviour, the commit should say `fix` or `feat`.
+RELEASABLE_TYPES='feat fix perf revert'
+
 die() { printf "error: %s\n" "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
@@ -173,6 +185,67 @@ EOF
     esac
 
     echo "$major.$minor.$patch"
+}
+
+# ---------------------------------------------------------------------------
+# releasable
+# ---------------------------------------------------------------------------
+
+# Exits 0 and lists the commits that justify a release, or exits 1 when there is
+# nothing worth shipping. The auto-release path asks this before it does
+# anything, so a push that only moves `chore` or `style` work through Sources/
+# no longer mints a version.
+#
+# Reports to stderr and stays quiet on stdout for the empty case, so a caller can
+# use the exit status alone.
+cmd_releasable() {
+    local since=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --since) since="${2:-}"; shift 2 ;;
+            *) die "unknown option '$1'" ;;
+        esac
+    done
+
+    local previous range
+    previous="${since:-$(latest_tag)}"
+    if [ -n "$previous" ] && git -C "$REPO_ROOT" rev-parse "$previous" >/dev/null 2>&1; then
+        range="$previous..HEAD"
+    else
+        # No release yet: the whole history counts, and a first release is always
+        # worth making.
+        range="HEAD"
+    fi
+
+    # A break is releasable whatever type it is filed under.
+    if range_has_breaking "$range"; then
+        echo "breaking change since ${previous:-the start of history}" >&2
+        git -C "$REPO_ROOT" log $range --no-merges --format='%h %s' | head -20
+        return 0
+    fi
+
+    local found="" type short full subject
+    while IFS='	' read -r short full subject; do
+        [ -n "$short" ] || continue
+        for type in $RELEASABLE_TYPES; do
+            if subject_has_type "$subject" "$type"; then
+                found="$found$short $subject
+"
+                break
+            fi
+        done
+    done <<EOF
+$(commits_in "$range")
+EOF
+
+    if [ -z "$found" ]; then
+        echo "nothing releasable since ${previous:-the start of history}" >&2
+        echo "  (looked for: $RELEASABLE_TYPES, or any breaking change)" >&2
+        return 1
+    fi
+
+    printf '%s' "$found"
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -408,6 +481,12 @@ COMMANDS
         `auto` infers the bump from the conventional-commit prefixes since the
         last tag: BREAKING change -> major, feat -> minor, otherwise patch.
 
+    releasable [--since <tag>]
+        Exit 0 and list the commits that justify a release; exit 1 when there is
+        nothing worth shipping. Releasable means feat, fix, perf or revert, or
+        any breaking change. The auto-release path gates on this so a `chore`
+        that happens to touch Sources/ does not mint a version.
+
     notes <version> [--since <tag>]
         Print release notes for the range since the last release tag.
         Writes nothing — use this to preview what a release will say.
@@ -445,6 +524,7 @@ EOF
 
 case "${1:-}" in
     next-version) shift; cmd_next_version "$@" ;;
+    releasable) shift; cmd_releasable "$@" ;;
     notes) shift; cmd_notes "$@" ;;
     update) shift; cmd_update "$@" ;;
     -h|--help|help|"") usage ;;

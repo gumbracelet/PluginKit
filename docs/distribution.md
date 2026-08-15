@@ -83,22 +83,43 @@ compatibility is computed against. See
 
 Three paths, all landing in the same place.
 
-### Automatic — a push to `Sources/`
+### Automatic — a releasable push to `Sources/`
 
-Any change under `Sources/` merged to `main`/`master` ships a release with no human input.
-The workflow infers the bump from the **conventional-commit prefixes** of the commits since
-the last tag:
+A push to `main`/`master` ships a release with no human input, but only when **both** halves
+hold. A `gate` job decides, and it has to answer yes three times:
+
+1. **Did this push touch `Sources/`?** Computed with `git diff` over the pushed range, not a
+   third-party action — path comparison is not worth granting write access for.
+2. **Is `HEAD` our own `chore(release):` commit?** If so, stop. The release commit stamps the
+   version constant, so it touches `Sources/` and would otherwise qualify.
+3. **Is anything since the last tag worth releasing?** At least one `feat`, `fix`, `perf` or
+   `revert`, or any breaking change.
+
+Point 3 is the difference between a semantic release and a path-triggered one. Touching a
+file under `Sources/` is not news; a fix is. Without it, a `chore` or `style` commit that
+happens to live under `Sources/` mints a version whose entire changelog entry reads
+*"No user-facing changes recorded"* — a version every consumer has to evaluate, for nothing.
+`refactor` is excluded on the same grounds: if a refactor changed behaviour, the commit
+should have said `fix` or `feat`.
+
+When the gate declines it writes a summary saying which check failed and how to override, so
+a run that ships nothing is never confused with one that did.
+
+The bump itself is then inferred from the **conventional-commit prefixes** since the last
+tag:
 
 | Prefix | Bump |
 |---|---|
 | `feat!:` / `BREAKING CHANGE:` | major |
 | `feat:` | minor |
-| anything else (`fix`, `refactor`, …) | patch |
+| anything else (`fix`, `perf`, …) | patch |
 
-A `paths`-filter guard confirms `Sources/` actually changed, so the release's own
-`CHANGELOG.md` commit (which never touches `Sources/`) does not re-trigger a loop. This is
-the intended path for routine work — push to a branch, merge to `main`, a tag lands
-automatically.
+The gate runs on `ubuntu-latest` and the release itself on `macos-15`, so deciding *not* to
+release costs seconds on a cheap runner rather than minutes on one GitHub bills at ten times
+the rate.
+
+To release something the gate would decline — a docs-only change you want tagged, say —
+dispatch manually. That path skips all three checks.
 
 ### Manual dispatch — for the unusual cases
 
@@ -128,9 +149,9 @@ Everything that can fail happens in steps 1–5, **before** anything is committe
 build never leaves a stray tag or changelog commit behind — both are far more annoying to
 undo than to prevent.
 
-Because step 3 writes into `Sources/`, the release's own commit matches the workflow's
-`paths` filter. Two things stop it re-triggering: pushing with the default `GITHUB_TOKEN`
-does not retrigger workflows at all, and the gate step additionally refuses to release a
+Because step 3 writes into `Sources/`, the release's own commit looks exactly like real work
+to a path filter. Two independent things stop it re-triggering: pushing with the default
+`GITHUB_TOKEN` does not retrigger workflows at all, and the `gate` job refuses to release a
 `HEAD` whose subject starts with `chore(release):`. Swapping in a PAT would defeat the first
 but not the second.
 

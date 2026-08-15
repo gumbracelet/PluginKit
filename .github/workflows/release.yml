@@ -1,7 +1,8 @@
 name: Release
 
 on:
-  # The normal path: pick a bump type, everything else is derived.
+  # The normal path: pick a bump type, everything else is derived. A dispatch is
+  # a human saying "release this", so it bypasses the automatic gating below.
   workflow_dispatch:
     inputs:
       version_type:
@@ -20,22 +21,19 @@ on:
         type: boolean
         default: false
 
-  # The automatic path: a change under Sources/ ships a release. The version is
-  # inferred from the conventional-commit prefixes since the last tag (breaking
-  # -> major, feat -> minor, otherwise patch), so no human input is needed.
+  # The automatic path: a *releasable* change under Sources/ ships a release.
+  # Both halves of that matter — see the gate job.
   #
-  # GitHub ignores `paths` for tag pushes and treats branches+paths ambiguously,
-  # so this single block is guarded by an explicit paths-filter step below: the
-  # auto branch only proceeds when Sources/ actually changed. That also stops
-  # the release's own CHANGELOG.md commit (which never touches Sources/) from
-  # re-triggering this workflow in a loop.
+  # `paths` here is only a pre-filter, and it is not load-bearing: GitHub does
+  # not apply path filters to tag pushes, and this block deliberately matches
+  # tags too. The gate job is the authority on whether a release happens.
   push:
     branches: [master, main]
     paths: ["Sources/**"]
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 # Two releases at once would race on tag creation. Never cancel one in flight —
 # it may already have pushed a tag.
@@ -44,16 +42,134 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # A separate job, on a cheap runner, so that deciding *not* to release costs
+  # seconds on Linux rather than minutes on macOS — which GitHub bills at ten
+  # times the rate. Previously the toolchain, version resolution and version
+  # stamp all ran on macOS before anything could conclude there was nothing to
+  # ship.
+  gate:
+    name: Decide
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      proceed: ${{ steps.decide.outputs.proceed }}
+      reason: ${{ steps.decide.outputs.reason }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Tags and full history: "is anything releasable since the last tag"
+          # cannot be answered from a shallow clone.
+          fetch-depth: 0
+
+      - name: Decide whether to release
+        id: decide
+        env:
+          # Secrets and inputs are not dependably readable from a step-level
+          # `if`, so the event shape is resolved into plain strings here.
+          DISPATCHED: ${{ github.event_name == 'workflow_dispatch' }}
+          AUTO: ${{ github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/') }}
+          # The branch tip before this push, used to find what it changed.
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          decide() {
+            echo "proceed=$1" >>"$GITHUB_OUTPUT"
+            echo "reason=$2" >>"$GITHUB_OUTPUT"
+            echo "$2"
+            exit 0
+          }
+
+          # A human asked for it, or a tag already exists and says what the
+          # version is. Neither is subject to the automatic heuristics.
+          #
+          # Written as `if` blocks rather than `cond && decide ...`: the latter
+          # works only because errexit exempts a failing non-final command in an
+          # AND-list, which is too subtle to leave load-bearing in the one place
+          # that decides whether a release happens.
+          if [ "$DISPATCHED" = "true" ]; then
+            decide true "dispatched manually"
+          fi
+          if [ "$AUTO" != "true" ]; then
+            decide true "tag push: ${GITHUB_REF_NAME}"
+          fi
+
+          # 1. Did this push touch Sources/ at all?
+          #
+          # Computed natively rather than with a third-party action. The action
+          # this replaces was pinned to a mutable tag and ran in a job that
+          # could write to the repository, which is a lot of trust to place in
+          # a path comparison git already does.
+          if [ -z "$BEFORE" ] \
+            || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+            || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            # A newly created branch, or a force-push that orphaned the old tip:
+            # there is no range to compare, so consider the pushed commit alone.
+            changed="$(git show --name-only --format= HEAD)"
+          else
+            changed="$(git diff --name-only "$BEFORE" HEAD)"
+          fi
+
+          if ! printf '%s\n' "$changed" | grep -q '^Sources/'; then
+            decide false "no Sources/ change in this push — nothing to release"
+          fi
+
+          # 2. Is HEAD our own release commit?
+          #
+          # The release commit stamps the version constant, so it touches
+          # Sources/ and passes the check above. Pushing with the default
+          # GITHUB_TOKEN already does not retrigger workflows; this is the guard
+          # that survives someone swapping in a PAT.
+          subject="$(git log -1 --format='%s')"
+          case "$subject" in
+            "chore(release): "*)
+              decide false "HEAD is the release commit itself — not releasing it again" ;;
+          esac
+
+          # 3. Is anything since the last tag actually worth releasing?
+          #
+          # This is the difference between a semantic release and a
+          # path-triggered one. Touching a file under Sources/ is not news; a
+          # feat, fix, perf, revert or breaking change is. Without this, a
+          # `chore` or `style` commit that happens to live under Sources/ mints
+          # a version whose changelog entry reads "_No user-facing changes
+          # recorded._" — a version consumers must evaluate, for nothing.
+          #
+          # Dispatch manually to release anyway; that path skips this entirely.
+          if ! Scripts/pluginkit-changelog releasable; then
+            decide false "no releasable commits since the last tag — nothing to release"
+          fi
+
+          decide true "releasable change under Sources/"
+
+      # A skipped release used to be indistinguishable from one that shipped:
+      # both showed a green tick and neither wrote a summary. Saying so plainly
+      # is what stops someone cancelling a run because they cannot tell.
+      - name: Explain a no-op
+        if: steps.decide.outputs.proceed != 'true'
+        run: |
+          {
+            echo "## No release"
+            echo
+            echo "${{ steps.decide.outputs.reason }}"
+            echo
+            echo "Run this workflow manually to release anyway:"
+            echo "**Actions → Release → Run workflow**."
+          } >>"$GITHUB_STEP_SUMMARY"
+
   release:
     name: Verify, tag, publish
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
     runs-on: macos-15
     timeout-minutes: 30
 
+    # Only this job writes. The gate job above reads.
+    permissions:
+      contents: write
+
     env:
-      # Secrets and inputs are not dependably readable from a step-level `if`,
-      # but job-level env is, so the conditions are hoisted here as booleans.
       DISPATCHED: ${{ github.event_name == 'workflow_dispatch' }}
-      # A branch push (not a tag push) to main/master is the auto-release path.
       AUTO: ${{ github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/') }}
       DRY_RUN: ${{ inputs.dry_run == true }}
 
@@ -65,55 +181,7 @@ jobs:
           # compute a wrong version silently, which is worse than failing.
           fetch-depth: 0
 
-      # GitHub ignores `paths` for tag pushes and its branches+paths evaluation
-      # is unreliable, so the trigger above is a pre-filter only. Confirm the
-      # auto path really changed Sources/ before releasing; otherwise bail out
-      # with a clean no-op. This is what stops the release's own CHANGELOG.md
-      # push to main/master from re-running the release forever.
-      - name: Confirm Sources/ changed
-        id: changes
-        if: env.AUTO == 'true'
-        uses: dorny/paths-filter@v3
-        with:
-          filters: |
-            sources:
-              - 'Sources/**'
-
-      # One decision, computed once, gating every step below — rather than the
-      # same compound condition repeated on each, where a step that forgot a
-      # clause would run when it should not.
-      #
-      # The release commit now touches Sources/ (it stamps the version
-      # constant), so the paths-filter alone no longer distinguishes real work
-      # from the release's own commit. The subject check is what does. Pushing
-      # with the default GITHUB_TOKEN already does not retrigger workflows; this
-      # is the second line of defence, and the one that survives someone
-      # swapping in a PAT.
-      - name: Decide whether to release
-        id: gate
-        env:
-          SOURCES_CHANGED: ${{ steps.changes.outputs.sources }}
-        run: |
-          if [ "$AUTO" != "true" ]; then
-            echo "proceed=true" >>"$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "$SOURCES_CHANGED" != "true" ]; then
-            echo "Sources/ unchanged — nothing to release"
-            echo "proceed=false" >>"$GITHUB_OUTPUT"
-            exit 0
-          fi
-          subject="$(git log -1 --format='%s')"
-          case "$subject" in
-            "chore(release): "*)
-              echo "HEAD is the release commit itself — not releasing it again"
-              echo "proceed=false" >>"$GITHUB_OUTPUT"
-              exit 0 ;;
-          esac
-          echo "proceed=true" >>"$GITHUB_OUTPUT"
-
       - name: Show toolchain
-        if: steps.gate.outputs.proceed == 'true'
         run: swift --version
 
       # Dispatched: derive the next version from the newest tag and the chosen
@@ -124,7 +192,6 @@ jobs:
       # so a crafted branch or tag name cannot inject commands here.
       - name: Resolve version
         id: version
-        if: steps.gate.outputs.proceed == 'true'
         env:
           VERSION_TYPE: ${{ inputs.version_type }}
         run: |
@@ -165,7 +232,7 @@ jobs:
       # gets tagged. Stamping afterwards would tag a commit whose version
       # constant was never compiled.
       - name: Stamp the package version
-        if: steps.gate.outputs.proceed == 'true' && (env.DISPATCHED == 'true' || env.AUTO == 'true')
+        if: env.DISPATCHED == 'true' || env.AUTO == 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: Scripts/pluginkit-version set "$VERSION"
@@ -175,7 +242,7 @@ jobs:
       # point: it is the check that would have caught v1.0.0 shipping with the
       # constant still reading 0.1.0.
       - name: Check the package version matches the tag
-        if: steps.gate.outputs.proceed == 'true' && env.DISPATCHED != 'true' && env.AUTO != 'true'
+        if: env.DISPATCHED != 'true' && env.AUTO != 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: Scripts/pluginkit-version check "$VERSION"
@@ -183,11 +250,9 @@ jobs:
       # Everything that can fail runs before the repository is touched, so a
       # broken build never leaves a stray tag or changelog commit behind.
       - name: Test
-        if: steps.gate.outputs.proceed == 'true'
         run: swift test
 
       - name: Release build
-        if: steps.gate.outputs.proceed == 'true'
         run: swift build -c release
 
       # PluginKitCore and PluginKitSDK are the only targets on a binary boundary
@@ -196,7 +261,6 @@ jobs:
       # cannot be loaded by a host linking another, and nothing else in the build
       # would say so. See docs/distribution.md.
       - name: Library evolution (Core + SDK)
-        if: steps.gate.outputs.proceed == 'true'
         run: |
           swift build -c release --target PluginKitCore \
             -Xswiftc -enable-library-evolution
@@ -205,7 +269,6 @@ jobs:
 
       - name: Generate release notes
         id: notes
-        if: steps.gate.outputs.proceed == 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
           PREVIOUS: ${{ steps.version.outputs.previous }}
@@ -227,9 +290,10 @@ jobs:
       #
       # Pushing with the default GITHUB_TOKEN deliberately does not retrigger
       # workflows, which is what stops the new tag from starting a second
-      # release. Swapping in a PAT here would reintroduce that loop.
+      # release. Swapping in a PAT here would reintroduce that loop — the gate
+      # job's `chore(release):` check is what would still catch it.
       - name: Commit changelog and tag
-        if: steps.gate.outputs.proceed == 'true' && (env.DISPATCHED == 'true' || env.AUTO == 'true') && env.DRY_RUN != 'true'
+        if: (env.DISPATCHED == 'true' || env.AUTO == 'true') && env.DRY_RUN != 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
           PREVIOUS: ${{ steps.version.outputs.previous }}
@@ -253,7 +317,7 @@ jobs:
           git push origin "v$VERSION"
 
       - name: Publish a GitHub release
-        if: steps.gate.outputs.proceed == 'true' && env.DRY_RUN != 'true'
+        if: env.DRY_RUN != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
@@ -284,11 +348,11 @@ jobs:
             --notes-file "$body"
 
       - name: Summary
-        if: steps.gate.outputs.proceed == 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
           PREVIOUS: ${{ steps.version.outputs.previous }}
           NOTES: ${{ steps.notes.outputs.path }}
+          REASON: ${{ needs.gate.outputs.reason }}
         run: |
           {
             if [ "$DRY_RUN" = "true" ]; then
@@ -296,6 +360,8 @@ jobs:
             else
               echo "## Released v$VERSION"
             fi
+            echo
+            echo "Triggered because: $REASON"
             echo
             echo "Previous release: \`${PREVIOUS:-none}\`"
             echo
