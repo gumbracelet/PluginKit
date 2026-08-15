@@ -1,0 +1,397 @@
+#!/usr/bin/env bash
+#
+# pluginkit-changelog — semantic versioning and changelog generation.
+#
+# Reads conventional commits out of git history and writes release notes in the
+# conventional-changelog format: emoji sections, a compare link in the heading,
+# and one linked commit per entry.
+#
+# Versions come from git tags, not from a file. PluginKit is a source-distributed
+# SwiftPM package, so the tag *is* the version — there is nothing else to keep in
+# sync, and no `version` field that can drift from what a consumer resolves.
+#
+# The bump is chosen by a human rather than inferred from commit types. That is
+# deliberate: for a library, the minor-versus-major decision depends on whether
+# public API changed shape, which a commit prefix does not reliably capture. The
+# distinction matters more here than in most packages, because PluginKitCore sits
+# on a binary boundary between separately-compiled host and plugin code.
+#
+# No dependencies, and written for the bash 3.2 that ships with macOS.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CHANGELOG_FILE="$REPO_ROOT/CHANGELOG.md"
+
+CHANGELOG_TITLE="# Changelog
+
+All notable changes to PluginKit are documented in this file.
+
+The format follows [Conventional Commits](https://www.conventionalcommits.org),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+While PluginKit is pre-1.0, a **minor** bump may change public API — see
+[docs/distribution.md](docs/distribution.md) for what each bump promises.
+"
+
+# Section order and headings. Types absent from this list — `chore` above all —
+# are intentionally omitted: a changelog is for people consuming the library, and
+# a dependency bump is not news to them.
+#
+# One "type|heading" pair per line, in the order they should appear.
+SECTIONS='feat|✨ Features
+fix|🐛 Bug Fixes
+perf|⚡ Performance Improvements
+revert|⏪ Reverts
+refactor|♻️ Code Refactoring
+docs|📝 Documentation
+test|✅ Tests
+build|📦 Build System
+ci|👷 CI/CD
+style|💄 Styles'
+
+die() { printf "error: %s\n" "$*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Repository facts
+# ---------------------------------------------------------------------------
+
+# The https URL commits and comparisons are linked against.
+repository_url() {
+    if [ -n "${GITHUB_SERVER_URL:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
+        echo "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+        return
+    fi
+    local remote
+    remote="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || echo "")"
+    case "$remote" in
+        "") echo "" ;;
+        git@*) # git@host:owner/repo.git
+            remote="${remote#git@}"
+            remote="${remote%.git}"
+            echo "https://${remote%%:*}/${remote#*:}" ;;
+        *) echo "${remote%.git}" ;;
+    esac
+}
+
+# Newest release tag, ignoring prereleases so a beta never becomes the base for a
+# stable bump. Empty before the first release.
+#
+# Filtered with awk rather than `grep -v`: grep exits non-zero when it matches
+# nothing, which under `set -e` would kill the script on a repository that has no
+# tags yet — exactly the first-release case.
+latest_tag() {
+    git -C "$REPO_ROOT" tag -l 'v*' --sort=-v:refname | awk '!/-/ { print; exit }'
+}
+
+# ---------------------------------------------------------------------------
+# next-version
+# ---------------------------------------------------------------------------
+
+cmd_next_version() {
+    local bump="${1:-}"
+    case "$bump" in
+        major|minor|patch) ;;
+        *) die "next-version needs one of: patch, minor, major" ;;
+    esac
+
+    local current base major minor patch
+    current="$(latest_tag)"
+    if [ -z "$current" ]; then
+        # No release yet. Bumping from 0.0.0 gives 0.0.1 / 0.1.0 / 1.0.0.
+        base="0.0.0"
+    else
+        base="${current#v}"
+        base="${base%%-*}"
+    fi
+
+    IFS='.' read -r major minor patch <<EOF
+$base
+EOF
+    major="${major:-0}"; minor="${minor:-0}"; patch="${patch:-0}"
+
+    # A non-numeric component means the tag is not semver, and silently treating
+    # it as 0 would quietly reset the series.
+    case "$major$minor$patch" in
+        *[!0-9]*) die "latest tag '$current' is not semver (expected vMAJOR.MINOR.PATCH)" ;;
+    esac
+
+    case "$bump" in
+        major) major=$((major + 1)); minor=0; patch=0 ;;
+        minor) minor=$((minor + 1)); patch=0 ;;
+        patch) patch=$((patch + 1)) ;;
+    esac
+
+    echo "$major.$minor.$patch"
+}
+
+# ---------------------------------------------------------------------------
+# notes
+# ---------------------------------------------------------------------------
+
+# Does a subject line belong to `type`? Matches `type:`, `type(scope):` and the
+# breaking-change `!` variants of both.
+subject_has_type() {
+    local subject="$1" type="$2"
+    case "$subject" in
+        "$type":*|"$type"!:*|"$type"\(*\):*|"$type"\(*\)!:*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# `feat(host): add x` -> `* **host:** add x ([abc123](…/commit/abc123…))`
+format_entry() {
+    local short="$1" full="$2" subject="$3" url="$4"
+    local head description scope=""
+
+    head="${subject%%:*}"          # feat(host)!
+    description="${subject#*:}"    #  add x
+    description="${description# }"
+
+    case "$head" in
+        *\(*\)*)
+            scope="${head#*\(}"
+            scope="${scope%%\)*}" ;;
+    esac
+
+    local link="$short"
+    if [ -n "$url" ]; then
+        link="[$short]($url/commit/$full)"
+    fi
+
+    if [ -n "$scope" ]; then
+        printf '* **%s:** %s (%s)\n' "$scope" "$description" "$link"
+    else
+        printf '* %s (%s)\n' "$description" "$link"
+    fi
+}
+
+# Commits in range, as "short<TAB>full<TAB>subject" lines.
+commits_in() {
+    local range="$1"
+    git -C "$REPO_ROOT" log $range --no-merges --pretty=format:'%h	%H	%s'
+    # A trailing newline so `read` sees the final entry.
+    echo
+}
+
+cmd_notes() {
+    local version="${1:-}"
+    shift || true
+    local since=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --since) since="${2:-}"; shift 2 ;;
+            *) die "unknown option '$1'" ;;
+        esac
+    done
+    [ -n "$version" ] || die "notes needs a version"
+
+    local url previous range heading
+    url="$(repository_url)"
+    previous="${since:-$(latest_tag)}"
+
+    if [ -n "$previous" ] && git -C "$REPO_ROOT" rev-parse "$previous" >/dev/null 2>&1; then
+        range="$previous..HEAD"
+    else
+        range="HEAD"
+        previous=""
+    fi
+
+    # Heading carries a compare link when there is something to compare against.
+    local date
+    date="$(date +%Y-%m-%d)"
+    if [ -n "$previous" ] && [ -n "$url" ]; then
+        heading="## [$version]($url/compare/$previous...v$version) ($date)"
+    elif [ -n "$url" ]; then
+        heading="## [$version]($url/releases/tag/v$version) ($date)"
+    else
+        heading="## [$version] ($date)"
+    fi
+
+    local commits body="" section_body
+    commits="$(commits_in "$range")"
+
+    # Breaking changes lead, because they are the only thing in a library's
+    # changelog that forces a reader to act.
+    section_body="$(breaking_entries "$range" "$url")"
+    if [ -n "$section_body" ]; then
+        # Two newlines: command substitution above stripped the trailing one, and
+        # the next heading needs a blank line before it.
+        body="$body### ⚠ BREAKING CHANGES
+
+$section_body
+
+"
+    fi
+
+    local type heading_text
+    while IFS='|' read -r type heading_text; do
+        [ -n "$type" ] || continue
+        section_body=""
+        while IFS='	' read -r short full subject; do
+            [ -n "$short" ] || continue
+            if subject_has_type "$subject" "$type"; then
+                section_body="$section_body$(format_entry "$short" "$full" "$subject" "$url")
+"
+            fi
+        done <<EOF
+$commits
+EOF
+        if [ -n "$section_body" ]; then
+            body="$body### $heading_text
+
+$section_body
+"
+        fi
+    done <<EOF
+$SECTIONS
+EOF
+
+    if [ -z "$body" ]; then
+        # No conventional commits in range. Say so rather than emitting an empty
+        # section, which reads as "nothing changed".
+        body="_No user-facing changes recorded. See the commit history for details._
+"
+    fi
+
+    printf '%s\n\n%s' "$heading" "$body"
+}
+
+# Commits marked breaking, either by `!` before the colon or by a
+# `BREAKING CHANGE:` footer.
+breaking_entries() {
+    local range="$1" url="$2" out=""
+
+    while IFS='	' read -r short full subject; do
+        [ -n "$short" ] || continue
+        local head="${subject%%:*}"
+        case "$head" in
+            *!) out="$out$(format_entry "$short" "$full" "$subject" "$url")
+" ;;
+        esac
+    done <<EOF
+$(commits_in "$range")
+EOF
+
+    # Footer form. Listed separately so a commit using both is not duplicated.
+    local full short subject
+    for full in $(git -C "$REPO_ROOT" log $range --no-merges --format='%H' \
+        --grep='^BREAKING[ -]CHANGE:' 2>/dev/null || true); do
+        subject="$(git -C "$REPO_ROOT" log -1 --format='%s' "$full")"
+        case "${subject%%:*}" in
+            *!) continue ;;  # already captured above
+        esac
+        short="$(git -C "$REPO_ROOT" log -1 --format='%h' "$full")"
+        out="$out$(format_entry "$short" "$full" "$subject" "$url")
+"
+    done
+
+    printf '%s' "$out"
+}
+
+# ---------------------------------------------------------------------------
+# update
+# ---------------------------------------------------------------------------
+
+cmd_update() {
+    local version="${1:-}"
+    shift || true
+    local since=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --since) since="${2:-}"; shift 2 ;;
+            *) die "unknown option '$1'" ;;
+        esac
+    done
+    [ -n "$version" ] || die "update needs a version"
+
+    local entry
+    if [ -n "$since" ]; then
+        entry="$(cmd_notes "$version" --since "$since")"
+    else
+        entry="$(cmd_notes "$version")"
+    fi
+
+    if [ ! -f "$CHANGELOG_FILE" ]; then
+        printf '%s\n%s\n' "$CHANGELOG_TITLE" "$entry" >"$CHANGELOG_FILE"
+        echo "created $(basename "$CHANGELOG_FILE") with $version"
+        return
+    fi
+
+    # Insert above the newest existing entry, keeping the file's preamble intact.
+    local first_entry_line
+    first_entry_line="$(awk '/^## / { print NR; exit }' "$CHANGELOG_FILE")"
+
+    local tmp
+    tmp="$(mktemp)"
+    if [ -n "$first_entry_line" ]; then
+        awk -v stop="$first_entry_line" 'NR < stop' "$CHANGELOG_FILE" \
+            | awk '{ lines[NR] = $0 } END { last = NR; while (last > 0 && lines[last] == "") last--; for (i = 1; i <= last; i++) print lines[i] }'
+        printf '\n%s\n\n' "$entry"
+        awk -v start="$first_entry_line" 'NR >= start' "$CHANGELOG_FILE"
+    else
+        awk '{ lines[NR] = $0 } END { last = NR; while (last > 0 && lines[last] == "") last--; for (i = 1; i <= last; i++) print lines[i] }' "$CHANGELOG_FILE"
+        printf '\n%s\n' "$entry"
+    fi >"$tmp"
+
+    mv "$tmp" "$CHANGELOG_FILE"
+    echo "updated $(basename "$CHANGELOG_FILE") with $version"
+}
+
+# ---------------------------------------------------------------------------
+# usage
+# ---------------------------------------------------------------------------
+
+usage() {
+    cat <<'EOF'
+pluginkit-changelog — semantic versioning and changelog generation.
+
+USAGE
+    Scripts/pluginkit-changelog <command> [arguments]
+
+COMMANDS
+    next-version <patch|minor|major>
+        Print the next version, computed from the newest release tag.
+        Prints 0.0.1 / 0.1.0 / 1.0.0 when no tag exists yet.
+
+    notes <version> [--since <tag>]
+        Print release notes for the range since the last release tag.
+        Writes nothing — use this to preview what a release will say.
+
+    update <version> [--since <tag>]
+        Prepend those notes to CHANGELOG.md, creating the file if needed.
+
+COMMIT TYPES
+    Sections are emitted in this order, and only when non-empty:
+
+      feat      ✨ Features                    revert    ⏪ Reverts
+      fix       🐛 Bug Fixes                   refactor  ♻️ Code Refactoring
+      perf      ⚡ Performance Improvements     docs      📝 Documentation
+      test      ✅ Tests                       build     📦 Build System
+      ci        👷 CI/CD                       style     💄 Styles
+
+    A `!` before the colon, or a `BREAKING CHANGE:` footer, additionally lists
+    the commit under ⚠ BREAKING CHANGES. `chore` is deliberately omitted.
+
+EXAMPLES
+    Scripts/pluginkit-changelog next-version minor        # 0.2.0
+    Scripts/pluginkit-changelog notes 0.2.0               # preview, no writes
+    Scripts/pluginkit-changelog update 0.2.0              # write CHANGELOG.md
+
+NOTES
+    Versions come from git tags, so a shallow clone will compute the wrong one.
+    CI checks out with fetch-depth: 0 for this reason.
+
+SEE ALSO
+    Scripts/pluginkit-release      Run a full release locally
+    docs/distribution.md           Versioning policy and the release flow
+EOF
+}
+
+case "${1:-}" in
+    next-version) shift; cmd_next_version "$@" ;;
+    notes) shift; cmd_notes "$@" ;;
+    update) shift; cmd_update "$@" ;;
+    -h|--help|help|"") usage ;;
+    *) die "unknown command '$1' (try --help)" ;;
+esac

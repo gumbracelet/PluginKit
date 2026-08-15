@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+#
+# pluginkit-release — cut a release from a clean working tree.
+#
+# The same sequence CI runs, so a maintainer can rehearse a release locally and
+# get the identical result. Everything that can fail runs *before* the repository
+# is touched: a broken build must never leave a stray tag or changelog commit
+# behind, because both are far more annoying to undo than to prevent.
+#
+# No dependencies beyond git, swift, and (for `--publish`) the GitHub CLI.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
+BUMP=""
+VERSION=""
+DRY_RUN=false
+PUBLISH=false
+
+die() { printf "error: %s\n" "$*" >&2; exit 1; }
+step() { printf "\n\033[1m==> %s\033[0m\n" "$*"; }
+
+usage() {
+    cat <<'EOF'
+pluginkit-release — cut a release.
+
+USAGE
+    Scripts/pluginkit-release <patch|minor|major> [options]
+    Scripts/pluginkit-release --version <x.y.z> [options]
+
+OPTIONS
+    --dry-run     Verify and generate notes, but do not commit, tag, or push.
+    --publish     Also create the GitHub release (requires `gh`).
+    -h, --help    This.
+
+WHAT IT DOES
+    1. Refuses to run on a dirty tree or a shallow clone.
+    2. Resolves the next version from the newest tag.
+    3. swift build && swift test && the library-evolution check.
+    4. Writes CHANGELOG.md, commits, and tags.
+    5. Optionally pushes and publishes.
+
+    Steps 1–3 happen before anything is written, so a failure leaves the
+    repository exactly as it was.
+
+EXAMPLES
+    Scripts/pluginkit-release minor --dry-run     # rehearse
+    Scripts/pluginkit-release patch --publish     # cut and publish
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        patch|minor|major) BUMP="$1"; shift ;;
+        --version) VERSION="${2:-}"; shift 2 ;;
+        --dry-run) DRY_RUN=true; shift ;;
+        --publish) PUBLISH=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) die "unknown argument '$1' (try --help)" ;;
+    esac
+done
+
+[ -n "$BUMP" ] || [ -n "$VERSION" ] || { usage; exit 64; }
+
+# ---------------------------------------------------------------------------
+# Preconditions
+# ---------------------------------------------------------------------------
+
+step "Checking preconditions"
+
+# Not merely "is there a repository" but "is *this* the repository". A checkout
+# nested inside an unrelated one would otherwise read that repo's tags and commit
+# a changelog into it — quietly operating on the wrong project.
+TOPLEVEL="$(git rev-parse --show-toplevel 2>/dev/null || echo "")"
+[ -n "$TOPLEVEL" ] \
+    || die "not a git repository; the version comes from tags, so there is nothing to release"
+[ "$TOPLEVEL" = "$REPO_ROOT" ] \
+    || die "$REPO_ROOT is not a git repository of its own (its parent $TOPLEVEL is); run 'git init' here first"
+
+[ -n "$(git status --porcelain)" ] && die "working tree is dirty; commit or stash first"
+
+# A shallow clone has no tag history, so the computed version would silently be
+# wrong — worse than failing, because the mistake ships.
+if [ "$(git rev-parse --is-shallow-repository 2>/dev/null || echo false)" = "true" ]; then
+    die "shallow clone: run 'git fetch --unshallow' so tags can be read"
+fi
+
+if [ -z "$VERSION" ]; then
+    VERSION="$(Scripts/pluginkit-changelog next-version "$BUMP")"
+fi
+
+PREVIOUS="$(git tag -l 'v*' --sort=-v:refname | awk '!/-/ { print; exit }')"
+
+git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null \
+    && die "tag v$VERSION already exists"
+
+echo "  ${PREVIOUS:-none} -> v$VERSION"
+
+# ---------------------------------------------------------------------------
+# Verify
+# ---------------------------------------------------------------------------
+
+step "Building"
+swift build -c release
+
+step "Testing"
+swift test
+
+# PluginKitCore and PluginKitSDK are the only targets that sit on a binary
+# boundary between a host and a separately-compiled plugin. If either stops
+# compiling under library evolution, a plugin built against one release cannot be
+# loaded by a host linking another — and nothing else in the build would say so.
+step "Checking library evolution (Core + SDK)"
+swift build -c release --target PluginKitCore -Xswiftc -enable-library-evolution
+swift build -c release --target PluginKitSDK -Xswiftc -enable-library-evolution
+
+# ---------------------------------------------------------------------------
+# Notes
+# ---------------------------------------------------------------------------
+
+step "Release notes"
+NOTES_FILE="$(mktemp)"
+if [ -n "$PREVIOUS" ]; then
+    Scripts/pluginkit-changelog notes "$VERSION" --since "$PREVIOUS" >"$NOTES_FILE"
+else
+    Scripts/pluginkit-changelog notes "$VERSION" >"$NOTES_FILE"
+fi
+cat "$NOTES_FILE"
+
+if [ "$DRY_RUN" = "true" ]; then
+    step "Dry run — nothing was written"
+    echo "  Would have tagged v$VERSION"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Commit and tag
+# ---------------------------------------------------------------------------
+
+step "Writing CHANGELOG.md and tagging"
+if [ -n "$PREVIOUS" ]; then
+    Scripts/pluginkit-changelog update "$VERSION" --since "$PREVIOUS"
+else
+    Scripts/pluginkit-changelog update "$VERSION"
+fi
+
+git add CHANGELOG.md
+git commit -m "chore(release): $VERSION [skip ci]"
+git tag -a "v$VERSION" -m "PluginKit $VERSION"
+
+echo "  Tagged v$VERSION"
+
+if [ "$PUBLISH" = "true" ]; then
+    step "Publishing"
+    command -v gh >/dev/null || die "gh is not installed; push and release by hand"
+    git push origin HEAD
+    git push origin "v$VERSION"
+    gh release create "v$VERSION" \
+        --title "PluginKit $VERSION" \
+        --notes-file "$NOTES_FILE"
+    echo "  Published v$VERSION"
+else
+    step "Next"
+    echo "  git push origin HEAD && git push origin v$VERSION"
+fi

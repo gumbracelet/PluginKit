@@ -1,0 +1,200 @@
+name: Release
+
+on:
+  # The normal path: pick a bump type, everything else is derived.
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: "Version bump type"
+        required: true
+        type: choice
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+      dry_run:
+        description: "Verify and generate notes, but do not commit, tag or publish"
+        required: false
+        type: boolean
+        default: false
+
+  # The escape hatch: tag by hand and this still works.
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+# Two releases at once would race on tag creation. Never cancel one in flight —
+# it may already have pushed a tag.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Verify, tag, publish
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    env:
+      # Secrets and inputs are not dependably readable from a step-level `if`,
+      # but job-level env is, so the conditions are hoisted here as booleans.
+      DISPATCHED: ${{ github.event_name == 'workflow_dispatch' }}
+      DRY_RUN: ${{ inputs.dry_run == true }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history and tags: the version is computed from the newest tag,
+          # and the changelog spans the range since it. A shallow clone would
+          # compute a wrong version silently, which is worse than failing.
+          fetch-depth: 0
+
+      - name: Show toolchain
+        run: swift --version
+
+      # Dispatched: derive the next version from the newest tag and the chosen
+      # bump. Tag-pushed: the tag already says what the version is.
+      #
+      # Inputs reach the shell through env, never through direct interpolation,
+      # so a crafted branch or tag name cannot inject commands here.
+      - name: Resolve version
+        id: version
+        env:
+          VERSION_TYPE: ${{ inputs.version_type }}
+        run: |
+          if [ "$DISPATCHED" = "true" ]; then
+            previous="$(git tag -l 'v*' --sort=-v:refname | awk '!/-/ { print; exit }')"
+            version="$(Scripts/pluginkit-changelog next-version "$VERSION_TYPE")"
+            echo "Bumping $VERSION_TYPE: ${previous:-none} -> v$version"
+          else
+            version="${GITHUB_REF_NAME#v}"
+            # The tag under release is already at HEAD, so the changelog range
+            # has to start at the tag before it.
+            previous="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || echo "")"
+            echo "Releasing tag $GITHUB_REF_NAME"
+          fi
+
+          case "$version" in
+            *[!0-9A-Za-z.+-]*|"") echo "refusing implausible version '$version'" >&2; exit 1 ;;
+          esac
+
+          if [ "$DISPATCHED" = "true" ] && git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "tag v$version already exists — nothing to bump into" >&2
+            exit 1
+          fi
+
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "previous=$previous" >>"$GITHUB_OUTPUT"
+
+      # Everything that can fail runs before the repository is touched, so a
+      # broken build never leaves a stray tag or changelog commit behind.
+      - name: Test
+        run: swift test
+
+      - name: Release build
+        run: swift build -c release
+
+      # PluginKitCore and PluginKitSDK are the only targets on a binary boundary
+      # between a host and a separately-compiled plugin. If either stops
+      # compiling under library evolution, a plugin built against one release
+      # cannot be loaded by a host linking another, and nothing else in the build
+      # would say so. See docs/distribution.md.
+      - name: Library evolution (Core + SDK)
+        run: |
+          swift build -c release --target PluginKitCore \
+            -Xswiftc -enable-library-evolution
+          swift build -c release --target PluginKitSDK \
+            -Xswiftc -enable-library-evolution
+
+      - name: Generate release notes
+        id: notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PREVIOUS: ${{ steps.version.outputs.previous }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/release"
+          notes="$RUNNER_TEMP/release/changelog.md"
+          if [ -n "$PREVIOUS" ]; then
+            Scripts/pluginkit-changelog notes "$VERSION" --since "$PREVIOUS" >"$notes"
+          else
+            Scripts/pluginkit-changelog notes "$VERSION" >"$notes"
+          fi
+          echo "path=$notes" >>"$GITHUB_OUTPUT"
+          echo "--- generated notes ---"
+          cat "$notes"
+
+      # Only the dispatched path owns the version, so only it writes CHANGELOG.md
+      # and creates the tag. A hand-pushed tag already exists, and its changelog
+      # entry is the maintainer's to add.
+      #
+      # Pushing with the default GITHUB_TOKEN deliberately does not retrigger
+      # workflows, which is what stops the new tag from starting a second
+      # release. Swapping in a PAT here would reintroduce that loop.
+      - name: Commit changelog and tag
+        if: env.DISPATCHED == 'true' && env.DRY_RUN != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PREVIOUS: ${{ steps.version.outputs.previous }}
+        run: |
+          if [ -n "$PREVIOUS" ]; then
+            Scripts/pluginkit-changelog update "$VERSION" --since "$PREVIOUS"
+          else
+            Scripts/pluginkit-changelog update "$VERSION"
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          git commit -m "chore(release): $VERSION [skip ci]"
+          git tag -a "v$VERSION" -m "PluginKit $VERSION"
+          git push origin HEAD:"${GITHUB_REF_NAME}"
+          git push origin "v$VERSION"
+
+      - name: Publish a GitHub release
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          NOTES: ${{ steps.notes.outputs.path }}
+        run: |
+          body="$RUNNER_TEMP/release/body.md"
+          {
+            cat "$NOTES"
+            echo
+            echo "---"
+            echo
+            echo "### Install"
+            echo
+            echo '```swift'
+            echo ".package(url: \"$REPO_URL.git\", from: \"$VERSION\")"
+            echo '```'
+            echo
+            echo "Hosts link \`PluginKitHost\` and a runtime; plugins link \`PluginKitSDK\`."
+            echo "See [docs/getting-started.md]($REPO_URL/blob/v$VERSION/docs/getting-started.md)."
+          } >"$body"
+
+          gh release create "v$VERSION" \
+            --title "PluginKit $VERSION" \
+            --notes-file "$body"
+
+      - name: Summary
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PREVIOUS: ${{ steps.version.outputs.previous }}
+          NOTES: ${{ steps.notes.outputs.path }}
+        run: |
+          {
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "## Dry run — v$VERSION was verified but nothing was published"
+            else
+              echo "## Released v$VERSION"
+            fi
+            echo
+            echo "Previous release: \`${PREVIOUS:-none}\`"
+            echo
+            cat "$NOTES"
+          } >>"$GITHUB_STEP_SUMMARY"
