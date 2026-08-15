@@ -3,3 +3,5 @@
 .claude/
 *.xcodeproj
 .DS_Store
+
+DESIGN.md
