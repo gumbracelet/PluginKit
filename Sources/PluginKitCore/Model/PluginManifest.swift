@@ -19,7 +19,7 @@ import Foundation
 ///   "id": "com.example.wordcount",
 ///   "version": "1.0.0",
 ///   "displayName": "Word Count",
-///   "sdkVersion": ">=0.1.0 <1.0.0",
+///   "sdkVersion": ">=1.0.0 <2.0.0",
 ///   "contracts": [
 ///     { "vocabulary": "com.acme.editor.api",
 ///       "builtAgainst": "1.0.0", "compatibleWith": ">=1.0.0 <2.0.0" }

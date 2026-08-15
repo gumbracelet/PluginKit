@@ -173,7 +173,12 @@ public struct HostInfo: Hashable, Sendable, Codable {
 public enum PluginKitVersion {
     /// The framework's own version. A plugin's `sdkVersion` range is checked
     /// against this at discovery, before anything is loaded.
-    public static let current: SemanticVersion = "0.1.0"
+    ///
+    /// The git tag is the version of record; this constant follows it. The
+    /// release path rewrites the line below via `Scripts/pluginkit-version set`
+    /// before it builds, and CI fails if the two disagree — so edit it by hand
+    /// only when you are also moving the tag.
+    public static let current: SemanticVersion = "1.0.0"
 }
 
 /// A contract one plugin publishes for others.
